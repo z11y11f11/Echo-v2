@@ -373,7 +373,8 @@ async function startServer() {
           "summaryDetail",
           "price",
           "recommendationTrend",
-          "calendarEvents"
+          "calendarEvents",
+          "assetProfile"   // company officers (CEO/CFO names, titles)
         ]
       });
       res.json(result);

@@ -212,14 +212,17 @@ export class StakeholderAgent {
     // Normalize and deduplicate by Yahoo Finance symbol
     const deduped = await deduplicateBySymbol(flattened);
 
+    // Enrich with real Yahoo Finance data (market cap, confirmed name)
+    const enriched = await this.enrichCandidatesWithYahooData(deduped);
+
     if (selectionMode === "specific") {
-      return deduped;
+      return enriched;
     }
 
     return [
-      ...this.takeSortedByType(deduped, "upstream", 3),
-      ...this.takeSortedByType(deduped, "downstream", 3),
-      ...this.takeSortedByType(deduped, "peer", 3)
+      ...this.takeSortedByType(enriched, "upstream", 3),
+      ...this.takeSortedByType(enriched, "downstream", 3),
+      ...this.takeSortedByType(enriched, "peer", 3)
     ];
   }
 
@@ -325,7 +328,97 @@ export class StakeholderAgent {
     }));
   }
 
+  /**
+   * Enriches candidate entities with real Yahoo Finance data.
+   * - Peers: replaces sort_value with actual market cap from Yahoo Finance
+   * - All entities: confirms company longName if available
+   * - Falls back to LLM-provided data on any error
+   */
+  private static async enrichCandidatesWithYahooData(
+    candidates: StakeholderEntity[]
+  ): Promise<StakeholderEntity[]> {
+    return Promise.all(candidates.map(async (entity) => {
+      if (!entity.ticker || entity.ticker === "N/A") return entity;
+      try {
+        const res = await fetch(`/api/stock/${encodeURIComponent(entity.ticker)}/summary`);
+        if (!res.ok) return entity;
+        const data = await res.json();
+        const price = data.price || {};
+        const marketCap: number | undefined = price.marketCap || data.summaryDetail?.marketCap;
+        const currency: string = price.currency || "USD";
+        const longName: string = price.longName || price.shortName || "";
+
+        let enriched = { ...entity };
+
+        // Update display name with official Yahoo Finance name
+        if (longName) enriched.name = longName;
+
+        // For peers: replace sort_value with real market cap
+        if (entity.type === "peer" && marketCap && marketCap > 0) {
+          if (marketCap >= 1e12)      enriched.sort_value = `${(marketCap / 1e12).toFixed(1)}T ${currency}`;
+          else if (marketCap >= 1e9)  enriched.sort_value = `${(marketCap / 1e9).toFixed(1)}B ${currency}`;
+          else if (marketCap >= 1e6)  enriched.sort_value = `${(marketCap / 1e6).toFixed(1)}M ${currency}`;
+          else                        enriched.sort_value = `${marketCap.toLocaleString()} ${currency}`;
+          enriched.description = price.longBusinessSummary?.slice(0, 200)
+            || (data.assetProfile?.longBusinessSummary?.slice(0, 200))
+            || enriched.description;
+        }
+
+        // For upstream/downstream: at least confirm the company is real
+        if (entity.sort_value === "no_public_data" && longName) {
+          enriched.description = data.assetProfile?.longBusinessSummary?.slice(0, 200) || enriched.description;
+        }
+
+        return enriched;
+      } catch {
+        return entity;
+      }
+    }));
+  }
+
+  /**
+   * Fetches management info: tries Yahoo Finance assetProfile first (real names),
+   * falls back to LLM if Yahoo Finance returns no officers.
+   */
   private static async analyzeManagement(ticker: string): Promise<ManagementInfo> {
+    // ── Try Yahoo Finance assetProfile first ─────────────────────────────────
+    try {
+      const res = await fetch(`/api/stock/${encodeURIComponent(ticker)}/summary`);
+      if (res.ok) {
+        const data = await res.json();
+        const officers: any[] = data.assetProfile?.companyOfficers || [];
+
+        const findOfficer = (keywords: string[]) =>
+          officers.find(o =>
+            keywords.some(kw => (o.title || "").toLowerCase().includes(kw))
+          );
+
+        const ceoData = findOfficer(["chief executive", " ceo", "(ceo)"]);
+        const cfoData = findOfficer(["chief financial", " cfo", "(cfo)"]);
+
+        if (ceoData || cfoData) {
+          // Estimate tenure from Yahoo Finance's yearBorn vs current year (rough proxy)
+          // Yahoo Finance doesn't expose hire date — leave as null
+          return {
+            ceo: {
+              name: ceoData?.name ?? null,
+              tenure_years: null,
+              recent_changes: []
+            },
+            cfo: {
+              name: cfoData?.name ?? null,
+              tenure_years: null,
+              recent_changes: []
+            },
+            compensation_alignment: "neutral"
+          };
+        }
+      }
+    } catch {
+      // Fall through to LLM
+    }
+
+    // ── LLM fallback ─────────────────────────────────────────────────────────
     const schemaProperties = {
       management: {
         type: Type.OBJECT,
