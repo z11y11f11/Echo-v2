@@ -181,7 +181,19 @@ export class StakeholderAgent {
     `;
 
     const result = await runGenerativeAI(prompt, schemaProperties, ["top_industries"]);
-    return (result.top_industries || []).slice(0, 5);
+    const raw: IndustryRevenue[] = result.top_industries || [];
+
+    // Deduplicate by industry name — keep the entry with the most recent period.
+    // "Most recent" = lexicographically largest period string (FY2024 > FY2023, Q4 2024 > Q3 2023).
+    const byIndustry = new Map<string, IndustryRevenue>();
+    for (const item of raw) {
+      const key = item.industry.trim().toLowerCase();
+      const existing = byIndustry.get(key);
+      if (!existing || item.period > existing.period) {
+        byIndustry.set(key, item);
+      }
+    }
+    return [...byIndustry.values()].slice(0, 5);
   }
 
   private static async buildCandidates(
@@ -191,7 +203,7 @@ export class StakeholderAgent {
   ): Promise<StakeholderEntity[]> {
     if (industries.length === 0) return [];
 
-    const perIndustryLimit = selectionMode === "comprehensive" ? 3 : 5;
+    const perIndustryLimit = 3; // always top 3 per type (upstream 3 + downstream 3 + peers 3 = max 9)
     const allCandidates = await Promise.all(
       industries.map(industry => this.identifyCandidatesForIndustry(ticker, industry, perIndustryLimit))
     );
@@ -205,9 +217,9 @@ export class StakeholderAgent {
     }
 
     return [
-      ...this.takeSortedByType(deduped, "upstream", 5),
-      ...this.takeSortedByType(deduped, "downstream", 5),
-      ...this.takeSortedByType(deduped, "peer", 5)
+      ...this.takeSortedByType(deduped, "upstream", 3),
+      ...this.takeSortedByType(deduped, "downstream", 3),
+      ...this.takeSortedByType(deduped, "peer", 3)
     ];
   }
 
@@ -223,11 +235,13 @@ export class StakeholderAgent {
           type: Type.OBJECT,
           required: ["name", "type", "industry", "description", "sort_value", "sort_metric"],
           properties: {
-            name: { type: Type.STRING },
-            type: { type: Type.STRING, enum: ["upstream", "downstream", "peer"] },
-            industry: { type: Type.STRING },
+            name:        { type: Type.STRING },
+            ticker:      { type: Type.STRING, description: "Stock ticker symbol (e.g. AAPL, 005930.KS, 0700.HK). Required for public companies." },
+            exchange:    { type: Type.STRING, description: "Exchange name (NYSE, NASDAQ, HKEX, KRX, SSE, SZSE, TSE, etc.)" },
+            type:        { type: Type.STRING, enum: ["upstream", "downstream", "peer"] },
+            industry:    { type: Type.STRING },
             description: { type: Type.STRING },
-            sort_value: { type: Type.STRING },
+            sort_value:  { type: Type.STRING },
             sort_metric: { type: Type.STRING, enum: ["transaction_volume", "market_cap"] }
           }
         }
@@ -240,18 +254,26 @@ export class StakeholderAgent {
       - top ${limitPerType} downstream companies by transaction volume with the target company
       - top ${limitPerType} public peers by market capitalization
 
-      Each candidate must include:
-      name, type, industry, one-sentence description, sort_value, sort_metric.
+      Each candidate MUST include: name, type, industry, one-sentence description, sort_value, sort_metric.
 
-      Rules:
+      CRITICAL — ticker requirement:
+      For each company you identify, you MUST provide:
+      - ticker: the stock ticker symbol compatible with Yahoo Finance (e.g. AAPL, 005930.KS, 0700.HK, 9988.HK)
+      - exchange: the exchange it trades on (NYSE, NASDAQ, HKEX, KRX, SSE, SZSE, TSE, etc.)
+      If you cannot identify the public ticker for a company, DO NOT include that company.
+      Only include publicly listed companies with verifiable ticker symbols.
+
+      Other rules:
       - sort_metric must be "transaction_volume" for upstream/downstream and "market_cap" for peers.
-      - If public transaction volume or market cap is unavailable, keep the entity and set sort_value to "no_public_data".
+      - If public transaction volume or market cap is unavailable, set sort_value to "no_public_data".
       - For entries with no public data, set description to "no_public_data".
-      - Do not drop private or important supply-chain entities only because data is missing.
     `;
 
     const result = await runGenerativeAI(prompt, schemaProperties, ["candidates"]);
-    return this.normalizeCandidates(result.candidates || [], industry);
+    const rawCandidates = this.normalizeCandidates(result.candidates || [], industry);
+
+    // Auto-resolve tickers: use LLM-provided ticker first, fall back to /api/search/:name
+    return await this.resolveTickersForCandidates(rawCandidates);
   }
 
   private static async analyzeSelectedEntities(
@@ -370,6 +392,8 @@ export class StakeholderAgent {
 
       return {
         name: candidate.name || "no_public_data",
+        ticker: candidate.ticker || undefined,
+        exchange: candidate.exchange || undefined,
         type,
         industry: candidate.industry || fallbackIndustry,
         description: sortValue === "no_public_data"
@@ -380,6 +404,45 @@ export class StakeholderAgent {
         analysis: candidate.analysis
       } as StakeholderEntity;
     });
+  }
+
+  /**
+   * For each candidate:
+   * 1. If the LLM provided a ticker, validate it against Yahoo Finance search.
+   * 2. If no ticker, query /api/search/:name to resolve one.
+   * 3. If still unresolvable, mark sort_value as "no_public_data".
+   * All failures are silent — the candidate is kept regardless.
+   */
+  private static async resolveTickersForCandidates(
+    candidates: StakeholderEntity[]
+  ): Promise<StakeholderEntity[]> {
+    return Promise.all(
+      candidates.map(async (entity) => {
+        // Already has a ticker from LLM — trust it (Yahoo Finance will validate at render time)
+        if (entity.ticker) return entity;
+
+        // No ticker: try search API by company name
+        try {
+          const res = await fetch(`/api/search/${encodeURIComponent(entity.name)}`);
+          if (!res.ok) return entity;
+          const data = await res.json();
+          const quotes: any[] = data.quotes || [];
+          const match = quotes.find(
+            (q) => q.typeDisp === "Equity" || q.quoteType === "EQUITY"
+          ) || quotes[0];
+          if (match?.symbol) {
+            return {
+              ...entity,
+              ticker: match.symbol,
+              exchange: match.exchange || entity.exchange,
+            };
+          }
+        } catch {
+          // silent — keep entity as-is
+        }
+        return entity;
+      })
+    );
   }
 
   private static normalizeManagement(management: any): ManagementInfo {

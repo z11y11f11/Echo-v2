@@ -164,8 +164,8 @@ export default function StakeholderModal({ ticker, onClose, onComplete }: Stakeh
               <section className="space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <h3 className="text-sm font-bold text-white">Step 1 — 行业选择</h3>
-                    <p className="mt-1 text-xs text-slate-500">选择一个或多个行业，或使用综合模式。</p>
+                    <h3 className="text-sm font-bold text-white">Step 1 — Industry Selection</h3>
+                    <p className="mt-1 text-xs text-slate-500">Select one or more industries, or use comprehensive mode.</p>
                   </div>
                   <button
                     onClick={() => setSelectionMode('comprehensive')}
@@ -175,7 +175,7 @@ export default function StakeholderModal({ ticker, onClose, onComplete }: Stakeh
                         : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-white'
                     }`}
                   >
-                    综合
+                    Comprehensive
                   </button>
                 </div>
 
@@ -206,8 +206,8 @@ export default function StakeholderModal({ ticker, onClose, onComplete }: Stakeh
             {step === 2 && (
               <section className="space-y-5">
                 <div>
-                  <h3 className="text-sm font-bold text-white">Step 2 — 候选列表</h3>
-                  <p className="mt-1 text-xs text-slate-500">按你选择的行业分组展示。上游/下游用于理解关系，Peers 用于后续对比。</p>
+                  <h3 className="text-sm font-bold text-white">Step 2 — Candidate List</h3>
+                  <p className="mt-1 text-xs text-slate-500">Grouped by selected industry. Upstream/Downstream for supply chain understanding, Peers for comparison.</p>
                 </div>
                 {visibleCandidateGroups.map(group => (
                   <IndustryCandidateGroup key={group.industry} industry={group.industry} entities={group.entities} />
@@ -218,8 +218,8 @@ export default function StakeholderModal({ ticker, onClose, onComplete }: Stakeh
             {step === 3 && (
               <section className="space-y-5">
                 <div>
-                  <h3 className="text-sm font-bold text-white">Step 3 — 最终勾选</h3>
-                  <p className="mt-1 text-xs text-slate-500">至少选择 1 个对象。Peers 会做 KPI 对比；上游/下游只做产业链关系理解。</p>
+                  <h3 className="text-sm font-bold text-white">Step 3 — Final Selection</h3>
+                  <p className="mt-1 text-xs text-slate-500">Select at least 1 entity. Peers will be compared by KPI; Upstream/Downstream for supply chain analysis.</p>
                 </div>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   {dedupedCandidates.map(entity => {
@@ -287,9 +287,9 @@ export default function StakeholderModal({ ticker, onClose, onComplete }: Stakeh
 }
 
 const IndustryCandidateGroup: React.FC<{ industry: string; entities: StakeholderEntity[] }> = ({ industry, entities }) => {
-  const upstream = entities.filter(item => item.type === 'upstream').slice(0, 5);
-  const downstream = entities.filter(item => item.type === 'downstream').slice(0, 5);
-  const peers = entities.filter(item => item.type === 'peer').slice(0, 5);
+  const upstream = entities.filter(item => item.type === 'upstream').slice(0, 3);
+  const downstream = entities.filter(item => item.type === 'downstream').slice(0, 3);
+  const peers = entities.filter(item => item.type === 'peer').slice(0, 3);
 
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
@@ -315,7 +315,7 @@ function CandidateColumn({ title, items }: { title: string; items: StakeholderEn
           <div key={entityKey(entity)} title={entity.description} className="flex min-h-10 items-center justify-between gap-2 rounded-lg border border-slate-800 bg-[#080a0f] px-3 py-2">
             <span className="truncate text-xs font-bold text-slate-200">{entity.name}</span>
             {entity.sort_value === 'no_public_data' && (
-              <span title="暂无公开数据" className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-700/50 bg-amber-950/30 text-amber-300">
+              <span title="No public data available" className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-700/50 bg-amber-950/30 text-amber-300">
                 <CircleHelp className="h-3.5 w-3.5" />
               </span>
             )}
@@ -352,7 +352,7 @@ function EntitySummary({ entity }: { entity: StakeholderEntity }) {
       <div className="flex items-center gap-2">
         <div className="truncate text-sm font-bold text-white">{entity.name}</div>
         {noPublicData && (
-          <span title="暂无公开数据" className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-700/50 bg-amber-950/30 text-amber-300">
+          <span title="No public data available" className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-700/50 bg-amber-950/30 text-amber-300">
             <CircleHelp className="h-3.5 w-3.5" />
           </span>
         )}

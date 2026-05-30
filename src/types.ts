@@ -112,6 +112,8 @@ export interface IndustryRevenue {
 
 export interface StakeholderEntity {
   name: string
+  ticker?: string                          // Yahoo Finance symbol, resolved from LLM or search API
+  exchange?: string                        // e.g. NYSE, NASDAQ, HKEX, KRX
   type: 'upstream' | 'downstream' | 'peer'
   industry: string
   description: string

@@ -1,6 +1,7 @@
 import { Type } from "@google/genai";
 import { runGenerativeAI } from "./LLMProvider";
 import { CrossAnalysisResult, ValuationVerdictResult, ValuationSummary, InvestmentSignal } from "../types";
+import { getLatestSignal } from "../utils/db";
 
 export class CIOAgent {
   /**
@@ -80,7 +81,30 @@ export class CIOAgent {
    * Confidence reflects signal consistency across all available data.
    */
   static async generateInvestmentSignal(context: any): Promise<InvestmentSignal> {
-    console.log("[CIOAgent] generateInvestmentSignal() called — company:", context?.company?.name, context?.company?.ticker);
+    const ticker: string = context?.company?.ticker || "";
+    console.log("[CIOAgent] generateInvestmentSignal() called — company:", context?.company?.name, ticker);
+
+    // Fetch previous signal for stability constraint
+    let previousSignalClause = "";
+    if (ticker) {
+      try {
+        const prev = await getLatestSignal(ticker);
+        if (prev) {
+          const prevDate = prev.generated_at?.slice(0, 10) ?? "unknown date";
+          previousSignalClause = `
+      Previous signal: ${prev.verdict} (${prev.confidence} confidence) on ${prevDate}.
+      Only change the verdict if there is clear new evidence:
+      - Analyst rating change or price-target upgrade/downgrade
+      - Significant news event (earnings surprise, M&A, material regulatory action)
+      - Price moved more than 10% since the previous signal date
+      Otherwise maintain the previous verdict and explain why in key_reasons.
+          `.trim();
+        }
+      } catch {
+        // silent — stability constraint is best-effort
+      }
+    }
+
     const schemaProperties = {
       verdict: { type: Type.STRING, enum: ["BUY", "HOLD", "SELL"] },
       confidence: { type: Type.STRING, enum: ["high", "medium", "low"] },
@@ -108,6 +132,8 @@ export class CIOAgent {
       - high: 3+ data sources agree on the same direction
       - medium: 2 sources agree, or 1 strong signal
       - low: conflicting signals or thin data
+
+      ${previousSignalClause}
 
       Return exactly 3 key_reasons and exactly 2 risk_warnings as concise bullet strings (no leading dashes).
 
