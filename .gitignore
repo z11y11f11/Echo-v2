@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+echo.db
+echo.db-journal

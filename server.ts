@@ -36,6 +36,14 @@ db.exec(`
     warnings  TEXT NOT NULL,
     timestamp TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS sent_alert_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_key  TEXT NOT NULL UNIQUE,
+    ticker     TEXT,
+    alert_type TEXT,
+    sent_at    TEXT NOT NULL
+  );
 `);
 
 const insertAnalysis = db.prepare(`
@@ -51,12 +59,75 @@ const insertValidation = db.prepare(`
   INSERT INTO validation_log (agent, warnings, timestamp) VALUES (?, ?, ?)
 `);
 
+const insertSentAlert = db.prepare(`
+  INSERT OR IGNORE INTO sent_alert_log (alert_key, ticker, alert_type, sent_at)
+  VALUES (?, ?, ?, ?)
+`);
+
+const selectSentAlert = db.prepare(`
+  SELECT alert_key FROM sent_alert_log WHERE alert_key = ?
+`);
+
 const yahooFinance = new YahooFinance();
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+type EmailPayload = {
+  to: string[];
+  subject: string;
+  html: string;
+  text?: string;
+};
+
+async function sendEmail({ to, subject, html, text }: EmailPayload) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.ALERT_FROM_EMAIL || "Echo Alerts <alerts@echo.local>";
+  if (!apiKey) {
+    const err: any = new Error("RESEND_API_KEY not configured");
+    err.statusCode = 503;
+    throw err;
+  }
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from,
+      to,
+      subject,
+      html,
+      text: text || html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Email send failed (${response.status}): ${detail}`);
+  }
+  return response.json().catch(() => ({ ok: true }));
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function cleanRecipients(input: unknown): string[] {
+  const list = Array.isArray(input) ? input : String(input || "").split(/[,\n;]/);
+  return list
+    .map(v => String(v).trim())
+    .filter(v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v));
+}
 
 // Setup Multer for PDF uploads (memory storage)
 const upload = multer({ storage: multer.memoryStorage() });
@@ -549,6 +620,161 @@ async function startServer() {
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Email alerts ───────────────────────────────────────────────────────────
+
+  app.post("/api/alerts/send", async (req, res) => {
+    try {
+      const recipients = cleanRecipients(req.body?.recipients);
+      const alerts = Array.isArray(req.body?.alerts) ? req.body.alerts : [];
+      if (recipients.length === 0) return res.status(400).json({ error: "At least one valid recipient email is required" });
+      if (alerts.length === 0) return res.status(400).json({ error: "alerts required" });
+
+      const unsent = alerts.filter((alert: any) => {
+        const key = String(alert.alertKey || "");
+        return key && !selectSentAlert.get(key);
+      });
+
+      if (unsent.length === 0) {
+        return res.json({ ok: true, sent: false, skipped: alerts.length, reason: "duplicate" });
+      }
+
+      const rows = unsent.map((alert: any) => `
+        <tr>
+          <td style="padding:10px;border-bottom:1px solid #1e293b;color:#e2e8f0;font-weight:700">${escapeHtml(alert.ticker)}</td>
+          <td style="padding:10px;border-bottom:1px solid #1e293b;color:#bfdbfe">${escapeHtml(alert.type)}</td>
+          <td style="padding:10px;border-bottom:1px solid #1e293b;color:#e2e8f0">${escapeHtml(alert.title || alert.message)}</td>
+          <td style="padding:10px;border-bottom:1px solid #1e293b;color:#94a3b8">${escapeHtml(alert.detail || "")}</td>
+        </tr>
+      `).join("");
+
+      const html = `
+        <div style="font-family:Inter,Arial,sans-serif;background:#020617;color:#e2e8f0;padding:24px">
+          <div style="max-width:760px;margin:0 auto;background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:20px">
+            <h1 style="margin:0 0 6px;font-size:20px;color:#fff">Echo Portfolio Alert</h1>
+            <p style="margin:0 0 18px;color:#94a3b8;font-size:13px">Triggered ${escapeHtml(new Date().toISOString())}</p>
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead>
+                <tr>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Ticker</th>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Type</th>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Signal</th>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Detail</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
+
+      await sendEmail({
+        to: recipients,
+        subject: `Echo alert: ${unsent.length} portfolio signal${unsent.length !== 1 ? "s" : ""}`,
+        html,
+      });
+
+      const sentAt = new Date().toISOString();
+      unsent.forEach((alert: any) => {
+        insertSentAlert.run(String(alert.alertKey), String(alert.ticker || ""), String(alert.type || ""), sentAt);
+      });
+
+      res.json({ ok: true, sent: true, count: unsent.length, skipped: alerts.length - unsent.length });
+    } catch (err: any) {
+      console.error("alerts/send error:", err);
+      res.status(err.statusCode || 500).json({ error: err.message || "Failed to send alert email" });
+    }
+  });
+
+  app.post("/api/alerts/monthly-report", async (req, res) => {
+    try {
+      const recipients = cleanRecipients(req.body?.recipients);
+      const portfolio = Array.isArray(req.body?.portfolio) ? req.body.portfolio : [];
+      const periodLabel = String(req.body?.periodLabel || "Current portfolio snapshot");
+      const periodStart = String(req.body?.periodStart || "");
+      const periodEnd = String(req.body?.periodEnd || "");
+      if (recipients.length === 0) return res.status(400).json({ error: "At least one valid recipient email is required" });
+      if (portfolio.length === 0) return res.status(400).json({ error: "portfolio required" });
+
+      const signalCounts = { BUY: 0, HOLD: 0, SELL: 0 };
+      const alertRows = portfolio.map((row: any) => ({
+        ticker: String(row.ticker || ""),
+        company: String(row.company || ""),
+        signal: String(row.signal || "NONE"),
+        highAlerts: Number(row.highAlerts || 0),
+        negativeNews: Number(row.negativeNews || 0),
+        priceChange: Number(row.priceChange || 0),
+      }));
+      alertRows.forEach(row => {
+        if (row.signal === "BUY" || row.signal === "HOLD" || row.signal === "SELL") signalCounts[row.signal as keyof typeof signalCounts]++;
+      });
+
+      const maxAlerts = Math.max(1, ...alertRows.map(r => r.highAlerts));
+      const maxNews = Math.max(1, ...alertRows.map(r => r.negativeNews));
+      const bar = (value: number, max: number, color: string) =>
+        `<div style="height:8px;width:${Math.max(4, Math.round((value / max) * 100))}%;background:${color};border-radius:999px"></div>`;
+
+      const signalChart = `
+        <div style="display:grid;gap:8px">
+          ${(["BUY", "HOLD", "SELL"] as const).map(key => `
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;margin-bottom:4px"><span>${key}</span><strong>${signalCounts[key]}</strong></div>
+              ${bar(signalCounts[key], Math.max(1, signalCounts.BUY, signalCounts.HOLD, signalCounts.SELL), key === "BUY" ? "#34d399" : key === "SELL" ? "#fb7185" : "#fbbf24")}
+            </div>
+          `).join("")}
+        </div>
+      `;
+
+      const rows = alertRows.map(row => `
+        <tr>
+          <td style="padding:10px;border-bottom:1px solid #1e293b;color:#e2e8f0;font-weight:700">${escapeHtml(row.ticker)}</td>
+          <td style="padding:10px;border-bottom:1px solid #1e293b;color:#94a3b8">${escapeHtml(row.company)}</td>
+          <td style="padding:10px;border-bottom:1px solid #1e293b;color:#e2e8f0">${escapeHtml(row.signal)}</td>
+          <td style="padding:10px;border-bottom:1px solid #1e293b">${bar(row.highAlerts, maxAlerts, "#fb7185")}<div style="font-size:11px;color:#94a3b8;margin-top:4px">${row.highAlerts} high</div></td>
+          <td style="padding:10px;border-bottom:1px solid #1e293b">${bar(row.negativeNews, maxNews, "#22d3ee")}<div style="font-size:11px;color:#94a3b8;margin-top:4px">${row.negativeNews} negative</div></td>
+          <td style="padding:10px;border-bottom:1px solid #1e293b;color:${row.priceChange < 0 ? "#fb7185" : "#34d399"};font-weight:700">${Number.isFinite(row.priceChange) ? row.priceChange.toFixed(2) : "0.00"}%</td>
+        </tr>
+      `).join("");
+
+      const html = `
+        <div style="font-family:Inter,Arial,sans-serif;background:#020617;color:#e2e8f0;padding:24px">
+          <div style="max-width:860px;margin:0 auto;background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:20px">
+            <h1 style="margin:0 0 6px;font-size:22px;color:#fff">Echo Portfolio Monthly Monitor</h1>
+            <p style="margin:0 0 4px;color:#94a3b8;font-size:13px">Period: ${escapeHtml(periodLabel)}</p>
+            <p style="margin:0 0 18px;color:#64748b;font-size:12px">Generated ${escapeHtml(new Date().toISOString())}${periodStart && periodEnd ? ` · ${escapeHtml(periodStart.slice(0, 10))} to ${escapeHtml(periodEnd.slice(0, 10))}` : ""}</p>
+            <div style="border:1px solid #1e293b;border-radius:10px;padding:14px;margin-bottom:18px;background:#020617">
+              <h2 style="margin:0 0 12px;font-size:14px;color:#cbd5e1">Investment Signal Mix</h2>
+              ${signalChart}
+            </div>
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead>
+                <tr>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Ticker</th>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Company</th>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Signal</th>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">High Alerts</th>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">Negative News</th>
+                  <th align="left" style="padding:10px;border-bottom:1px solid #334155;color:#64748b;text-transform:uppercase;font-size:10px;letter-spacing:.08em">1D Move</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
+
+      await sendEmail({
+        to: recipients,
+        subject: `Echo monthly portfolio monitor - ${periodLabel} (${portfolio.length} tickers)`,
+        html,
+      });
+
+      res.json({ ok: true, sent: true, count: portfolio.length });
+    } catch (err: any) {
+      console.error("alerts/monthly-report error:", err);
+      res.status(err.statusCode || 500).json({ error: err.message || "Failed to send monthly report" });
     }
   });
 

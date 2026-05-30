@@ -42,6 +42,32 @@ export class StakeholderAgent {
     return await this.buildCandidates(ticker, industries, selectionMode);
   }
 
+  /**
+   * One-shot data fetch for the stakeholder browse view:
+   * returns company intro, top industries, and all upstream/downstream/peer
+   * candidates ready to display.
+   */
+  static async getBrowseData(
+    ticker: string,
+    onEvent?: (event: AgentEvent) => void
+  ): Promise<{
+    topIndustries: IndustryRevenue[];
+    candidates: StakeholderEntity[];
+    companyIntro: string;
+  }> {
+    onEvent?.({ agent: "StakeholderAgent", status: `Loading top industries for ${ticker}…` });
+    const topIndustries = await this.identifyTopIndustries(ticker);
+    const industryNames = topIndustries.map(i => i.industry);
+
+    onEvent?.({ agent: "StakeholderAgent", status: `Loading stakeholders across ${industryNames.length} segments…` });
+    const [candidates, companyIntro] = await Promise.all([
+      this.buildCandidates(ticker, industryNames, "comprehensive"),
+      this.generateCompanyIntro(ticker, industryNames),
+    ]);
+
+    return { topIndustries, candidates, companyIntro };
+  }
+
   static async runSelectedAnalysis(
     input: StakeholderSelectionInput,
     onEvent?: (event: AgentEvent) => void
@@ -203,7 +229,7 @@ export class StakeholderAgent {
   ): Promise<StakeholderEntity[]> {
     if (industries.length === 0) return [];
 
-    const perIndustryLimit = 3; // always top 3 per type (upstream 3 + downstream 3 + peers 3 = max 9)
+    const perIndustryLimit = 5; // top 5 per type (upstream 5 + downstream 5 + peers 5 = max 15)
     const allCandidates = await Promise.all(
       industries.map(industry => this.identifyCandidatesForIndustry(ticker, industry, perIndustryLimit))
     );
@@ -220,9 +246,9 @@ export class StakeholderAgent {
     }
 
     return [
-      ...this.takeSortedByType(enriched, "upstream", 3),
-      ...this.takeSortedByType(enriched, "downstream", 3),
-      ...this.takeSortedByType(enriched, "peer", 3)
+      ...this.takeSortedByType(enriched, "upstream", 5),
+      ...this.takeSortedByType(enriched, "downstream", 5),
+      ...this.takeSortedByType(enriched, "peer", 5)
     ];
   }
 

@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { X, RefreshCw, Clock, Globe, ShieldAlert, BarChart3, Zap, BellRing } from 'lucide-react';
+import { X, RefreshCw, Clock, Globe, ShieldAlert, BarChart3, Zap, BellRing, Mail, TrendingDown } from 'lucide-react';
 import { motion } from 'motion/react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -24,6 +24,14 @@ export interface EchoSettings {
     compliance: 'off' | 'daily' | 'weekly' | 'monthly';
     signal:     'off' | 'after_refresh' | 'weekly';
   };
+  alerts: {
+    enabled: boolean;
+    recipients: string;
+    highCompliance: boolean;
+    negativeNews: boolean;
+    sellSignal: boolean;
+    priceMovePct: number;
+  };
 }
 
 export const DEFAULT_SETTINGS: EchoSettings = {
@@ -40,6 +48,14 @@ export const DEFAULT_SETTINGS: EchoSettings = {
     compliance: 'weekly',
     signal:     'after_refresh',
   },
+  alerts: {
+    enabled: false,
+    recipients: '',
+    highCompliance: true,
+    negativeNews: true,
+    sellSignal: true,
+    priceMovePct: 5,
+  },
 };
 
 const LS_KEY = 'echo_settings_v1';
@@ -47,7 +63,15 @@ const LS_KEY = 'echo_settings_v1';
 export function loadSettings(): EchoSettings {
   try {
     const raw = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
-    if (raw) return { ...DEFAULT_SETTINGS, ...raw, autoRefresh: { ...DEFAULT_SETTINGS.autoRefresh, ...raw.autoRefresh }, intervals: { ...DEFAULT_SETTINGS.intervals, ...raw.intervals } };
+    if (raw) {
+      return {
+        ...DEFAULT_SETTINGS,
+        ...raw,
+        autoRefresh: { ...DEFAULT_SETTINGS.autoRefresh, ...raw.autoRefresh },
+        intervals: { ...DEFAULT_SETTINGS.intervals, ...raw.intervals },
+        alerts: { ...DEFAULT_SETTINGS.alerts, ...raw.alerts },
+      };
+    }
   } catch {}
   return DEFAULT_SETTINGS;
 }
@@ -100,6 +124,34 @@ function Select({ value, options, onChange }: {
     >
       {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>
+  );
+}
+
+function TextInput({ value, placeholder, onChange }: {
+  value: string; placeholder?: string; onChange: (v: string) => void;
+}) {
+  return (
+    <input
+      value={value}
+      placeholder={placeholder}
+      onChange={e => onChange(e.target.value)}
+      className="w-48 bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-500/50 placeholder-slate-600"
+    />
+  );
+}
+
+function NumberInput({ value, min, max, onChange }: {
+  value: number; min: number; max: number; onChange: (v: number) => void;
+}) {
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      value={value}
+      onChange={e => onChange(Math.min(max, Math.max(min, Number(e.target.value) || min)))}
+      className="w-20 bg-slate-900 border border-slate-700 text-slate-200 text-xs font-bold rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-500/50"
+    />
   );
 }
 
@@ -163,6 +215,8 @@ export default function SettingsPanel({ settings, onChange, onClose, lastAutoRef
     set({ autoRefresh: { ...settings.autoRefresh, ...patch } });
   const setIv = (patch: Partial<EchoSettings['intervals']>) =>
     set({ intervals: { ...settings.intervals, ...patch } });
+  const setAlerts = (patch: Partial<EchoSettings['alerts']>) =>
+    set({ alerts: { ...settings.alerts, ...patch } });
 
   return (
     <>
@@ -325,6 +379,71 @@ export default function SettingsPanel({ settings, onChange, onClose, lastAutoRef
                 ]}
                 onChange={v => setIv({ signal: v as any })}
               />
+            </SettingRow>
+          </div>
+
+          {/* ── Email alerts ───────────────────────────────────────────────── */}
+          <div className="mb-1 text-[10px] font-bold text-slate-600 uppercase tracking-widest">
+            Email Alerts
+          </div>
+          <div className="text-[10px] text-slate-600 mb-2">
+            Sends after manual or scheduled Portfolio refresh. Duplicate alerts are skipped by the server.
+          </div>
+
+          <div className="bg-[#0a0d14] border border-slate-800 rounded-xl px-4 py-1 mb-4">
+            <SettingRow
+              icon={<BellRing className="w-4 h-4" />}
+              label="Enable email alerts"
+              sub="Requires RESEND_API_KEY on the server"
+            >
+              <Toggle checked={settings.alerts.enabled} onChange={v => setAlerts({ enabled: v })} />
+            </SettingRow>
+
+            <SettingRow
+              icon={<Mail className="w-4 h-4" />}
+              label="Recipients"
+              sub="Separate multiple emails with commas"
+            >
+              <TextInput
+                value={settings.alerts.recipients}
+                placeholder="name@company.com"
+                onChange={v => setAlerts({ recipients: v })}
+              />
+            </SettingRow>
+
+            <SettingRow
+              icon={<ShieldAlert className="w-4 h-4" />}
+              label="High compliance alert"
+              sub="Regulatory, legal, or ESG urgency = high"
+            >
+              <Toggle checked={settings.alerts.highCompliance} onChange={v => setAlerts({ highCompliance: v })} />
+            </SettingRow>
+
+            <SettingRow
+              icon={<Globe className="w-4 h-4" />}
+              label="Negative news"
+              sub="News signal sentiment is negative"
+            >
+              <Toggle checked={settings.alerts.negativeNews} onChange={v => setAlerts({ negativeNews: v })} />
+            </SettingRow>
+
+            <SettingRow
+              icon={<Zap className="w-4 h-4" />}
+              label="Signal changed to SELL"
+              sub="Latest CIO signal moves from non-SELL to SELL"
+            >
+              <Toggle checked={settings.alerts.sellSignal} onChange={v => setAlerts({ sellSignal: v })} />
+            </SettingRow>
+
+            <SettingRow
+              icon={<TrendingDown className="w-4 h-4" />}
+              label="1-day price move"
+              sub="Absolute regular market change threshold"
+            >
+              <div className="flex items-center gap-1">
+                <NumberInput value={settings.alerts.priceMovePct} min={1} max={50} onChange={v => setAlerts({ priceMovePct: v })} />
+                <span className="text-xs text-slate-500 font-bold">%</span>
+              </div>
             </SettingRow>
           </div>
 
