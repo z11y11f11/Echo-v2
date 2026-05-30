@@ -5,17 +5,20 @@
  * View 2 (Individual Stock):    signal card + price card + news + compliance + history
  *
  * Data sources:
- *   - Signal / history : GET /api/log/history/:ticker
- *   - Market price     : GET /api/stock/:ticker
- *   - News / compliance: localStorage  echo_webintel_{ticker} / echo_compliance_{ticker}
- *     (written by Orchestrator after each full analysis)
+ *   Signal / history : GET /api/log/history/:ticker
+ *   Market price     : GET /api/stock/:ticker
+ *   News / compliance: POST /api/refresh/:ticker  (live)
+ *                      or localStorage echo_webintel_{ticker} / echo_compliance_{ticker} (cached)
+ *
+ * Key design: webIntel + compliance are held in React state (`liveData`) — never
+ * read directly from localStorage inside render — so refreshes trigger re-renders.
  */
 
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  Plus, X, RefreshCw, TrendingUp, TrendingDown, Minus,
-  AlertTriangle, CheckCircle2, Clock, ChevronRight,
-  BarChart3, ExternalLink, Loader2, ShieldAlert, Globe,
+  Plus, X, RefreshCw, TrendingUp, TrendingDown,
+  AlertTriangle, CheckCircle2, Clock,
+  ExternalLink, Loader2, ShieldAlert, Globe,
   History, Zap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -44,33 +47,25 @@ interface SignalRecord {
 }
 
 interface NewsSignal {
-  title: string;
-  url: string;
-  snippet: string;
-  date: string | null;
+  title: string; url: string; snippet: string; date: string | null;
   sentiment: 'positive' | 'negative' | 'neutral';
 }
-
 interface ComplianceAlert {
-  summary: string;
-  source: string;
-  urgency: 'high' | 'medium' | 'low';
-  date: string | null;
-  category: string;
+  summary: string; source: string; urgency: 'high' | 'medium' | 'low';
+  date: string | null; category: string;
+}
+interface WebIntelData { news_signals?: NewsSignal[]; data_gaps?: string[]; }
+interface ComplianceData { alerts?: ComplianceAlert[]; overall_risk?: string; data_gaps?: string[]; }
+
+interface LiveEntry {
+  webIntel: WebIntelData;
+  compliance: ComplianceData;
+  refreshedAt: string;
 }
 
-interface WebIntelCache {
-  news_signals?: NewsSignal[];
-  data_gaps?: string[];
-}
+type RefreshStatus = 'idle' | 'refreshing' | 'error';
 
-interface ComplianceCache {
-  alerts?: ComplianceAlert[];
-  overall_risk?: string;
-  data_gaps?: string[];
-}
-
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Persistence helpers ───────────────────────────────────────────────────────
 
 const LS_WATCHLIST = 'echo_watchlist_v2';
 
@@ -80,11 +75,31 @@ function loadWatchlist(): WatchlistItem[] {
 function saveWatchlist(items: WatchlistItem[]) {
   localStorage.setItem(LS_WATCHLIST, JSON.stringify(items));
 }
-function readWebIntel(ticker: string): WebIntelCache | null {
-  try { return JSON.parse(localStorage.getItem(`echo_webintel_${ticker}`) || 'null'); } catch { return null; }
+
+/** Load cached webIntel+compliance from localStorage into liveData state on mount. */
+function loadCachedLiveData(tickers: string[]): Record<string, LiveEntry> {
+  const result: Record<string, LiveEntry> = {};
+  for (const t of tickers) {
+    try {
+      const wi = JSON.parse(localStorage.getItem(`echo_webintel_${t}`) || 'null');
+      const co = JSON.parse(localStorage.getItem(`echo_compliance_${t}`) || 'null');
+      if (wi || co) {
+        result[t] = {
+          webIntel:    wi  ?? {},
+          compliance:  co  ?? {},
+          refreshedAt: wi?.as_of ?? co?.as_of ?? '',
+        };
+      }
+    } catch {}
+  }
+  return result;
 }
-function readCompliance(ticker: string): ComplianceCache | null {
-  try { return JSON.parse(localStorage.getItem(`echo_compliance_${ticker}`) || 'null'); } catch { return null; }
+
+function persistLiveData(ticker: string, entry: LiveEntry) {
+  try {
+    localStorage.setItem(`echo_webintel_${ticker}`,   JSON.stringify(entry.webIntel));
+    localStorage.setItem(`echo_compliance_${ticker}`, JSON.stringify(entry.compliance));
+  } catch {}
 }
 
 // ── Style helpers ─────────────────────────────────────────────────────────────
@@ -94,25 +109,19 @@ function verdictStyle(v?: string) {
   if (v === 'SELL') return { badge: 'bg-rose-950/60 text-rose-300 border-rose-500/40',          dot: 'bg-rose-400',    text: 'text-rose-300' };
   return              { badge: 'bg-amber-950/60 text-amber-300 border-amber-500/40',              dot: 'bg-amber-400',   text: 'text-amber-300' };
 }
-
 function confidenceStyle(c?: string) {
-  if (c === 'high')   return 'text-emerald-400';
-  if (c === 'medium') return 'text-amber-400';
-  return 'text-slate-400';
+  return c === 'high' ? 'text-emerald-400' : c === 'medium' ? 'text-amber-400' : 'text-slate-400';
 }
-
 function urgencyStyle(u?: string) {
   if (u === 'high')   return 'bg-rose-950/40 text-rose-400 border-rose-500/30';
   if (u === 'medium') return 'bg-amber-950/40 text-amber-400 border-amber-500/30';
   return 'bg-slate-800/50 text-slate-400 border-slate-700';
 }
-
 function sentimentStyle(s?: string) {
   if (s === 'positive') return 'bg-emerald-950/40 text-emerald-400 border-emerald-500/30';
   if (s === 'negative') return 'bg-rose-950/40 text-rose-400 border-rose-500/30';
   return 'bg-slate-800/50 text-slate-400 border-slate-700';
 }
-
 function relTime(iso?: string): string {
   if (!iso) return '—';
   const diff = Date.now() - new Date(iso).getTime();
@@ -120,26 +129,21 @@ function relTime(iso?: string): string {
   if (m < 1) return 'just now';
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
 }
-
-function fmtPrice(price?: number, currency?: string): string {
+function fmtPrice(price?: number, currency?: string) {
   if (!price) return '—';
   const sym = currency === 'USD' ? '$' : (currency || '');
-  const val = currency === 'KRW' || currency === 'JPY'
+  const val = (currency === 'KRW' || currency === 'JPY')
     ? Math.round(price).toLocaleString()
     : price.toLocaleString(undefined, { maximumFractionDigits: 2 });
   return `${sym}${val}`;
 }
-
-function fmtChange(pct?: number): { text: string; cls: string } {
-  if (pct === undefined || pct === null) return { text: '—', cls: 'text-slate-500' };
-  const sign = pct >= 0 ? '+' : '';
-  return { text: `${sign}${pct.toFixed(2)}%`, cls: pct >= 0 ? 'text-emerald-400' : 'text-rose-400' };
+function fmtChange(pct?: number) {
+  if (pct == null) return { text: '—', cls: 'text-slate-500' };
+  return { text: `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`, cls: pct >= 0 ? 'text-emerald-400' : 'text-rose-400' };
 }
-
-function fmtMktCap(v?: number, currency?: string): string {
+function fmtMktCap(v?: number, currency?: string) {
   if (!v) return '—';
   const cur = currency ? ` ${currency}` : '';
   if (v >= 1e12) return `${(v / 1e12).toFixed(1)}T${cur}`;
@@ -150,40 +154,34 @@ function fmtMktCap(v?: number, currency?: string): string {
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 
-const Skeleton = ({ h = 'h-4', w = 'w-full' }: { h?: string; w?: string }) => (
+const Sk = ({ h = 'h-4', w = 'w-full' }: { h?: string; w?: string }) => (
   <div className={`${h} ${w} bg-slate-800 rounded animate-pulse`} />
 );
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-interface Props {
-  onNavigateToAnalysis: () => void;
-}
-
-export default function WatchlistDashboard({ onNavigateToAnalysis }: Props) {
-  // watchlist + tabs state
+export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigateToAnalysis: () => void }) {
   const [watchlist, setWatchlist]     = useState<WatchlistItem[]>(loadWatchlist);
-  const [openTabs, setOpenTabs]       = useState<string[]>([]);   // tickers with individual tabs open
+  const [openTabs, setOpenTabs]       = useState<string[]>([]);
   const [activeView, setActiveView]   = useState<'portfolio' | string>('portfolio');
 
-  // per-ticker data
-  const [quotes,   setQuotes]   = useState<Record<string, StockQuote>>({});
-  const [signals,  setSignals]  = useState<Record<string, SignalRecord[]>>({});
+  const [quotes,         setQuotes]         = useState<Record<string, StockQuote>>({});
+  const [signals,        setSignals]        = useState<Record<string, SignalRecord[]>>({});
+  const [liveData,       setLiveData]       = useState<Record<string, LiveEntry>>({});
   const [loadingTickers, setLoadingTickers] = useState<Set<string>>(new Set());
+  const [refreshStatus,  setRefreshStatus]  = useState<Record<string, RefreshStatus>>({});
 
-  // add-ticker UI
-  const [addInput, setAddInput]   = useState('');
-  const [addOpen,  setAddOpen]    = useState(false);
-  const [addError, setAddError]   = useState('');
+  const [addInput, setAddInput] = useState('');
+  const [addOpen,  setAddOpen]  = useState(false);
+  const [addError, setAddError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // persist watchlist
+  // Persist watchlist
   useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
-
-  // auto-focus add input
+  // Focus add input
   useEffect(() => { if (addOpen) setTimeout(() => inputRef.current?.focus(), 50); }, [addOpen]);
 
-  // ── Data fetching ───────────────────────────────────────────────────────────
+  // ── Fetch price + signal history ────────────────────────────────────────────
 
   const fetchTickerData = useCallback(async (ticker: string) => {
     setLoadingTickers(prev => new Set(prev).add(ticker));
@@ -192,20 +190,14 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: Props) {
         fetch(`/api/stock/${encodeURIComponent(ticker)}`).then(r => r.ok ? r.json() : null),
         fetch(`/api/log/history/${encodeURIComponent(ticker)}`).then(r => r.ok ? r.json() : []),
       ]);
-
       if (quoteRes.status === 'fulfilled' && quoteRes.value) {
         const q = quoteRes.value;
-        setQuotes(prev => ({
-          ...prev,
-          [ticker]: {
-            regularMarketPrice:         q.regularMarketPrice,
-            regularMarketChangePercent: q.regularMarketChangePercent,
-            currency:                   q.currency,
-            longName:                   q.longName || q.shortName,
-            marketCap:                  q.marketCap,
-            trailingPE:                 q.trailingPE,
-          }
-        }));
+        setQuotes(prev => ({ ...prev, [ticker]: {
+          regularMarketPrice: q.regularMarketPrice,
+          regularMarketChangePercent: q.regularMarketChangePercent,
+          currency: q.currency, longName: q.longName || q.shortName,
+          marketCap: q.marketCap, trailingPE: q.trailingPE,
+        }}));
       }
       if (histRes.status === 'fulfilled' && Array.isArray(histRes.value)) {
         setSignals(prev => ({ ...prev, [ticker]: histRes.value }));
@@ -215,9 +207,48 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: Props) {
     }
   }, []);
 
-  // fetch all tickers on mount, then individual on add
+  // ── Refresh (price + webIntel + compliance via server) ──────────────────────
+
+  const refreshTicker = useCallback(async (ticker: string) => {
+    setRefreshStatus(prev => ({ ...prev, [ticker]: 'refreshing' }));
+    try {
+      const res = await fetch(`/api/refresh/${encodeURIComponent(ticker)}`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      // Update price
+      if (data.price) {
+        const q = data.price;
+        setQuotes(prev => ({ ...prev, [ticker]: {
+          regularMarketPrice: q.regularMarketPrice,
+          regularMarketChangePercent: q.regularMarketChangePercent,
+          currency: q.currency, longName: q.longName || q.shortName,
+          marketCap: q.marketCap, trailingPE: q.trailingPE,
+        }}));
+      }
+
+      // Update liveData (webIntel + compliance) — triggers re-render in all consumers
+      const entry: LiveEntry = {
+        webIntel:    data.webIntel   ?? {},
+        compliance:  data.compliance ?? {},
+        refreshedAt: data.refreshed_at ?? new Date().toISOString(),
+      };
+      setLiveData(prev => ({ ...prev, [ticker]: entry }));
+      persistLiveData(ticker, entry);
+      setRefreshStatus(prev => ({ ...prev, [ticker]: 'idle' }));
+    } catch (e: any) {
+      console.error(`[Refresh] ${ticker}:`, e);
+      setRefreshStatus(prev => ({ ...prev, [ticker]: 'error' }));
+      // Reset error status after 4 seconds so user can retry
+      setTimeout(() => setRefreshStatus(prev => ({ ...prev, [ticker]: 'idle' })), 4000);
+    }
+  }, []);
+
+  // On mount: fetch all tickers + load cached liveData from localStorage
   useEffect(() => {
-    watchlist.forEach(w => fetchTickerData(w.ticker));
+    const tickers = watchlist.map(w => w.ticker);
+    tickers.forEach(t => fetchTickerData(t));
+    setLiveData(loadCachedLiveData(tickers));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Watchlist management ────────────────────────────────────────────────────
@@ -229,6 +260,9 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: Props) {
     if (watchlist.some(w => w.ticker === t)) { setAddError('Already in watchlist'); return; }
     setWatchlist(prev => [...prev, { ticker: t, addedAt: new Date().toISOString() }]);
     fetchTickerData(t);
+    // Load any cached data for the newly added ticker
+    const cached = loadCachedLiveData([t]);
+    if (cached[t]) setLiveData(prev => ({ ...prev, [t]: cached[t] }));
     setAddInput(''); setAddError(''); setAddOpen(false);
   };
 
@@ -238,28 +272,28 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: Props) {
     if (activeView === ticker) setActiveView('portfolio');
     setQuotes(prev => { const n = {...prev}; delete n[ticker]; return n; });
     setSignals(prev => { const n = {...prev}; delete n[ticker]; return n; });
+    setLiveData(prev => { const n = {...prev}; delete n[ticker]; return n; });
   };
 
   const openStockTab = (ticker: string) => {
     if (!openTabs.includes(ticker)) setOpenTabs(prev => [...prev, ticker]);
     setActiveView(ticker);
   };
-
   const closeStockTab = (ticker: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setOpenTabs(prev => prev.filter(t => t !== ticker));
     if (activeView === ticker) setActiveView('portfolio');
   };
 
-  // ── Computed summaries for portfolio header ─────────────────────────────────
+  // ── Summary for portfolio header (uses liveData for fresh compliance counts) ─
 
   const totalHoldings = watchlist.length;
   const signalCounts = { BUY: 0, HOLD: 0, SELL: 0 };
   let activeAlerts = 0;
   watchlist.forEach(w => {
     const latest = signals[w.ticker]?.[0];
-    if (latest?.verdict) signalCounts[latest.verdict]++;
-    const comp = readCompliance(w.ticker);
+    if (latest?.verdict) signalCounts[latest.verdict as keyof typeof signalCounts]++;
+    const comp = liveData[w.ticker]?.compliance;
     activeAlerts += comp?.alerts?.filter(a => a.urgency === 'high').length ?? 0;
   });
 
@@ -268,64 +302,42 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: Props) {
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-[#02040a]">
 
-      {/* ── Inner tab bar ───────────────────────────────────────────────── */}
+      {/* Inner tab bar */}
       <div className="shrink-0 flex items-center gap-1 px-4 h-10 border-b border-slate-800/60 bg-[#080a0f]/80 overflow-x-auto">
-        {/* Portfolio tab */}
         <button
           onClick={() => setActiveView('portfolio')}
           className={`shrink-0 px-3 py-1 rounded-md text-xs font-bold transition-colors ${
-            activeView === 'portfolio'
-              ? 'bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20'
-              : 'text-slate-500 hover:text-slate-300'
+            activeView === 'portfolio' ? 'bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20' : 'text-slate-500 hover:text-slate-300'
           }`}
-        >
-          Portfolio
-        </button>
-
-        {/* Individual ticker tabs */}
+        >Portfolio</button>
         {openTabs.map(ticker => (
           <button
             key={ticker}
             onClick={() => setActiveView(ticker)}
             className={`shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-colors group ${
-              activeView === ticker
-                ? 'bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/20'
-                : 'text-slate-500 hover:text-slate-300'
+              activeView === ticker ? 'bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/20' : 'text-slate-500 hover:text-slate-300'
             }`}
           >
             <span className="font-mono">{ticker}</span>
-            <X
-              className="w-3 h-3 opacity-50 group-hover:opacity-100 hover:text-rose-400 transition-colors"
-              onClick={e => closeStockTab(ticker, e)}
-            />
+            <X className="w-3 h-3 opacity-50 group-hover:opacity-100 hover:text-rose-400 transition-colors" onClick={e => closeStockTab(ticker, e)} />
           </button>
         ))}
       </div>
 
-      {/* ── Content ─────────────────────────────────────────────────────── */}
+      {/* Content */}
       <div className="flex-1 overflow-y-auto">
         <AnimatePresence mode="wait">
           {activeView === 'portfolio' ? (
             <motion.div key="portfolio" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.1 }}>
               <PortfolioView
-                watchlist={watchlist}
-                quotes={quotes}
-                signals={signals}
-                loadingTickers={loadingTickers}
-                signalCounts={signalCounts}
-                totalHoldings={totalHoldings}
-                activeAlerts={activeAlerts}
-                addInput={addInput}
-                setAddInput={setAddInput}
-                addOpen={addOpen}
-                setAddOpen={setAddOpen}
-                addError={addError}
-                setAddError={setAddError}
-                inputRef={inputRef}
-                onAddTicker={addTicker}
-                onRemoveTicker={removeTicker}
+                watchlist={watchlist} quotes={quotes} signals={signals} liveData={liveData}
+                loadingTickers={loadingTickers} refreshStatus={refreshStatus}
+                signalCounts={signalCounts} totalHoldings={totalHoldings} activeAlerts={activeAlerts}
+                addInput={addInput} setAddInput={setAddInput} addOpen={addOpen} setAddOpen={setAddOpen}
+                addError={addError} setAddError={setAddError} inputRef={inputRef}
+                onAddTicker={addTicker} onRemoveTicker={removeTicker}
                 onSelectTicker={openStockTab}
-                onRefresh={fetchTickerData}
+                onRefresh={ticker => { fetchTickerData(ticker); refreshTicker(ticker); }}
               />
             </motion.div>
           ) : (
@@ -334,9 +346,11 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: Props) {
                 ticker={activeView}
                 quote={quotes[activeView]}
                 signalHistory={signals[activeView] || []}
+                liveEntry={liveData[activeView]}
                 loading={loadingTickers.has(activeView)}
+                refreshStatus={refreshStatus[activeView] ?? 'idle'}
                 onNavigateToAnalysis={onNavigateToAnalysis}
-                onRefresh={() => fetchTickerData(activeView)}
+                onRefresh={() => { fetchTickerData(activeView); refreshTicker(activeView); }}
               />
             </motion.div>
           )}
@@ -352,16 +366,15 @@ interface PortfolioViewProps {
   watchlist: WatchlistItem[];
   quotes: Record<string, StockQuote>;
   signals: Record<string, SignalRecord[]>;
+  liveData: Record<string, LiveEntry>;
   loadingTickers: Set<string>;
+  refreshStatus: Record<string, RefreshStatus>;
   signalCounts: Record<string, number>;
   totalHoldings: number;
   activeAlerts: number;
-  addInput: string;
-  setAddInput: (v: string) => void;
-  addOpen: boolean;
-  setAddOpen: (v: boolean) => void;
-  addError: string;
-  setAddError: (v: string) => void;
+  addInput: string; setAddInput: (v: string) => void;
+  addOpen: boolean;  setAddOpen: (v: boolean) => void;
+  addError: string;  setAddError: (v: string) => void;
   inputRef: React.RefObject<HTMLInputElement>;
   onAddTicker: () => void;
   onRemoveTicker: (t: string) => void;
@@ -370,7 +383,7 @@ interface PortfolioViewProps {
 }
 
 function PortfolioView({
-  watchlist, quotes, signals, loadingTickers,
+  watchlist, quotes, signals, liveData, loadingTickers, refreshStatus,
   signalCounts, totalHoldings, activeAlerts,
   addInput, setAddInput, addOpen, setAddOpen, addError, setAddError,
   inputRef, onAddTicker, onRemoveTicker, onSelectTicker, onRefresh,
@@ -378,19 +391,12 @@ function PortfolioView({
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
 
-      {/* ── Summary cards ─────────────────────────────────────────────── */}
+      {/* Summary cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <SummaryCard label="Total Holdings" value={String(totalHoldings)} sub="tracked tickers" accent="text-blue-400" />
         <SummaryCard
-          label="Total Holdings"
-          value={String(totalHoldings)}
-          sub="tracked tickers"
-          accent="text-blue-400"
-        />
-        <SummaryCard
-          label="Active Alerts"
-          value={activeAlerts > 0 ? String(activeAlerts) : '—'}
-          sub="high urgency compliance"
-          accent={activeAlerts > 0 ? 'text-rose-400' : 'text-slate-500'}
+          label="Active Alerts" value={activeAlerts > 0 ? String(activeAlerts) : '—'}
+          sub="high urgency compliance" accent={activeAlerts > 0 ? 'text-rose-400' : 'text-slate-500'}
           valueClass={activeAlerts > 0 ? 'text-rose-400' : undefined}
         />
         <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
@@ -406,18 +412,15 @@ function PortfolioView({
         </div>
       </div>
 
-      {/* ── Holdings table ─────────────────────────────────────────────── */}
+      {/* Holdings table */}
       <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl overflow-hidden">
         <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
           <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Holdings</span>
-          {watchlist.length > 0 && (
-            <span className="text-[10px] text-slate-600">{watchlist.length} ticker{watchlist.length !== 1 ? 's' : ''}</span>
-          )}
+          {watchlist.length > 0 && <span className="text-[10px] text-slate-600">{watchlist.length} ticker{watchlist.length !== 1 ? 's' : ''}</span>}
         </div>
-
         {watchlist.length === 0 ? (
           <div className="px-6 py-12 text-center">
-            <p className="text-slate-500 text-sm">No tickers in watchlist yet.</p>
+            <p className="text-slate-500 text-sm">No tickers yet.</p>
             <p className="text-slate-600 text-xs mt-1">Add a ticker below to start monitoring.</p>
           </div>
         ) : (
@@ -437,83 +440,68 @@ function PortfolioView({
               </thead>
               <tbody className="divide-y divide-slate-800/50">
                 {watchlist.map(item => {
-                  const q = quotes[item.ticker];
-                  const hist = signals[item.ticker];
-                  const latest = hist?.[0];
-                  const comp = readCompliance(item.ticker);
-                  const highAlerts = comp?.alerts?.filter(a => a.urgency === 'high').length ?? 0;
-                  const isLoading = loadingTickers.has(item.ticker);
+                  const q      = quotes[item.ticker];
+                  const latest = signals[item.ticker]?.[0];
+                  const comp   = liveData[item.ticker]?.compliance;
+                  const high   = comp?.alerts?.filter(a => a.urgency === 'high').length ?? 0;
+                  const isFetching = loadingTickers.has(item.ticker);
+                  const isRefreshing = refreshStatus[item.ticker] === 'refreshing';
+                  const isErr  = refreshStatus[item.ticker] === 'error';
                   const change = fmtChange(q?.regularMarketChangePercent);
-                  const vc = verdictStyle(latest?.verdict);
+                  const vc     = verdictStyle(latest?.verdict);
+                  const refreshedAt = liveData[item.ticker]?.refreshedAt;
 
                   return (
-                    <tr
-                      key={item.ticker}
-                      onClick={() => onSelectTicker(item.ticker)}
-                      className="hover:bg-slate-800/30 cursor-pointer transition-colors group"
-                    >
+                    <tr key={item.ticker} onClick={() => onSelectTicker(item.ticker)} className="hover:bg-slate-800/30 cursor-pointer transition-colors group">
                       <td className="px-5 py-3.5">
                         <div className="flex items-center gap-2">
-                          <div className={`w-2 h-2 rounded-full shrink-0 ${isLoading ? 'bg-blue-400 animate-pulse' : (latest ? vc.dot : 'bg-slate-600')}`} />
+                          <div className={`w-2 h-2 rounded-full shrink-0 ${
+                            isFetching || isRefreshing ? 'bg-blue-400 animate-pulse' : (latest ? vc.dot : 'bg-slate-600')
+                          }`} />
                           <span className="font-bold font-mono text-white">{item.ticker}</span>
                         </div>
                       </td>
-                      <td className="px-5 py-3.5">
-                        {isLoading ? <Skeleton w="w-32" /> : (
-                          <span className="text-slate-300 truncate max-w-[180px] block">{q?.longName || '—'}</span>
-                        )}
-                      </td>
+                      <td className="px-5 py-3.5">{isFetching ? <Sk w="w-32" /> : <span className="text-slate-300 truncate max-w-[180px] block">{q?.longName || '—'}</span>}</td>
+                      <td className="px-5 py-3.5 text-right font-mono">{isFetching ? <Sk w="w-16" /> : <span className="text-white">{fmtPrice(q?.regularMarketPrice, q?.currency)}</span>}</td>
                       <td className="px-5 py-3.5 text-right font-mono">
-                        {isLoading ? <Skeleton w="w-16" /> : (
-                          <span className="text-white">{fmtPrice(q?.regularMarketPrice, q?.currency)}</span>
-                        )}
-                      </td>
-                      <td className="px-5 py-3.5 text-right font-mono">
-                        {isLoading ? <Skeleton w="w-14" /> : (
+                        {isFetching ? <Sk w="w-14" /> : (
                           <span className={`flex items-center justify-end gap-1 font-bold ${change.cls}`}>
-                            {q?.regularMarketChangePercent !== undefined && (
-                              q.regularMarketChangePercent >= 0
-                                ? <TrendingUp className="w-3 h-3" />
-                                : <TrendingDown className="w-3 h-3" />
-                            )}
+                            {q?.regularMarketChangePercent != null && (q.regularMarketChangePercent >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />)}
                             {change.text}
                           </span>
                         )}
                       </td>
                       <td className="px-5 py-3.5 text-center">
-                        {isLoading ? <Skeleton w="w-12 mx-auto" /> : latest ? (
-                          <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-black uppercase tracking-widest ${vc.badge}`}>
-                            {latest.verdict}
-                          </span>
+                        {isFetching ? <Sk w="w-12 mx-auto" /> : latest ? (
+                          <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-black uppercase tracking-widest ${vc.badge}`}>{latest.verdict}</span>
                         ) : <span className="text-slate-600 text-xs">—</span>}
                       </td>
                       <td className="px-5 py-3.5 text-center">
-                        {highAlerts > 0 ? (
-                          <span className="inline-flex items-center gap-1 text-rose-400 font-bold text-xs">
-                            <AlertTriangle className="w-3 h-3" />{highAlerts}
-                          </span>
+                        {high > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-rose-400 font-bold text-xs"><AlertTriangle className="w-3 h-3" />{high}</span>
                         ) : <span className="text-slate-600 text-xs">—</span>}
                       </td>
                       <td className="px-5 py-3.5 text-right">
-                        <span className="text-[11px] text-slate-500 flex items-center justify-end gap-1">
-                          <Clock className="w-3 h-3" />
-                          {relTime(latest?.created_at || latest?.generated_at)}
-                        </span>
+                        {isErr ? (
+                          <span className="text-[10px] text-rose-400">Refresh failed</span>
+                        ) : (
+                          <span className="text-[11px] text-slate-500 flex items-center justify-end gap-1">
+                            <Clock className="w-3 h-3" />
+                            {relTime(refreshedAt || latest?.created_at || latest?.generated_at)}
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-3.5">
                         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button
                             onClick={e => { e.stopPropagation(); onRefresh(item.ticker); }}
-                            className="p-1.5 rounded-lg hover:bg-slate-700/50 text-slate-500 hover:text-slate-300 transition-colors"
+                            disabled={isRefreshing || isFetching}
+                            className="p-1.5 rounded-lg hover:bg-slate-700/50 text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
                             title="Refresh"
                           >
-                            <RefreshCw className="w-3.5 h-3.5" />
+                            <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
                           </button>
-                          <button
-                            onClick={e => { e.stopPropagation(); onRemoveTicker(item.ticker); }}
-                            className="p-1.5 rounded-lg hover:bg-rose-950/30 text-slate-500 hover:text-rose-400 transition-colors"
-                            title="Remove"
-                          >
+                          <button onClick={e => { e.stopPropagation(); onRemoveTicker(item.ticker); }} className="p-1.5 rounded-lg hover:bg-rose-950/30 text-slate-500 hover:text-rose-400 transition-colors" title="Remove">
                             <X className="w-3.5 h-3.5" />
                           </button>
                         </div>
@@ -526,37 +514,23 @@ function PortfolioView({
           </div>
         )}
 
-        {/* ── Add ticker ─────────────────────────────────────────────────── */}
+        {/* Add ticker */}
         <div className="px-5 py-4 border-t border-slate-800/60">
           {addOpen ? (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <input
-                ref={inputRef}
-                value={addInput}
+                ref={inputRef} value={addInput}
                 onChange={e => { setAddInput(e.target.value.toUpperCase()); setAddError(''); }}
                 onKeyDown={e => { if (e.key === 'Enter') onAddTicker(); if (e.key === 'Escape') { setAddOpen(false); setAddInput(''); setAddError(''); } }}
                 placeholder="Enter ticker (e.g. AAPL)"
                 className="w-48 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-white placeholder-slate-600 focus:outline-none focus:border-blue-500/50"
               />
-              <button
-                onClick={onAddTicker}
-                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors"
-              >
-                Add
-              </button>
-              <button
-                onClick={() => { setAddOpen(false); setAddInput(''); setAddError(''); }}
-                className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-white text-xs rounded-lg transition-colors"
-              >
-                Cancel
-              </button>
+              <button onClick={onAddTicker} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors">Add</button>
+              <button onClick={() => { setAddOpen(false); setAddInput(''); setAddError(''); }} className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-white text-xs rounded-lg transition-colors">Cancel</button>
               {addError && <span className="text-[10px] text-rose-400">{addError}</span>}
             </div>
           ) : (
-            <button
-              onClick={() => setAddOpen(true)}
-              className="flex items-center gap-2 text-xs font-bold text-slate-500 hover:text-slate-300 transition-colors"
-            >
+            <button onClick={() => setAddOpen(true)} className="flex items-center gap-2 text-xs font-bold text-slate-500 hover:text-slate-300 transition-colors">
               <Plus className="w-4 h-4" /> Add Ticker
             </button>
           )}
@@ -572,61 +546,73 @@ interface IndividualStockViewProps {
   ticker: string;
   quote?: StockQuote;
   signalHistory: SignalRecord[];
+  liveEntry?: LiveEntry;
   loading: boolean;
+  refreshStatus: RefreshStatus;
   onNavigateToAnalysis: () => void;
   onRefresh: () => void;
 }
 
-function IndividualStockView({
-  ticker, quote, signalHistory, loading, onNavigateToAnalysis, onRefresh
-}: IndividualStockViewProps) {
-  const latest = signalHistory[0];
-  const webIntel = readWebIntel(ticker);
-  const compliance = readCompliance(ticker);
-  const vc = verdictStyle(latest?.verdict);
-  const change = fmtChange(quote?.regularMarketChangePercent);
+function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading, refreshStatus, onNavigateToAnalysis, onRefresh }: IndividualStockViewProps) {
+  const latest     = signalHistory[0];
+  const newsSignals = liveEntry?.webIntel?.news_signals ?? [];
+  const alerts      = liveEntry?.compliance?.alerts ?? [];
+  const vc          = verdictStyle(latest?.verdict);
+  const change      = fmtChange(quote?.regularMarketChangePercent);
+  const isRefreshing = refreshStatus === 'refreshing';
+  const isError      = refreshStatus === 'error';
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-5">
 
-      {/* ── Ticker header ─────────────────────────────────────────────── */}
+      {/* Header */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <div className="flex items-center gap-3">
             <span className="text-2xl font-black font-mono text-white">{ticker}</span>
-            {loading && <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />}
+            {(loading || isRefreshing) && <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />}
           </div>
           {quote?.longName && <p className="text-sm text-slate-400 mt-0.5">{quote.longName}</p>}
         </div>
         <div className="flex items-center gap-2">
+          {/* Refresh status indicator */}
+          {liveEntry?.refreshedAt && !isRefreshing && !isError && (
+            <span className="text-[10px] text-slate-500 flex items-center gap-1">
+              <Clock className="w-3 h-3" /> Updated {relTime(liveEntry.refreshedAt)}
+            </span>
+          )}
+          {isError && (
+            <span className="text-[10px] text-rose-400 font-bold flex items-center gap-1">
+              <AlertTriangle className="w-3 h-3" /> Refresh failed, showing cached data
+            </span>
+          )}
           <button
             onClick={onRefresh}
-            disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-700 rounded-lg text-xs font-bold text-slate-400 hover:text-white transition-colors disabled:opacity-40"
+            disabled={loading || isRefreshing}
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-700 rounded-lg text-xs font-bold text-slate-400 hover:text-white hover:border-blue-500/50 transition-colors disabled:opacity-40"
           >
-            <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} /> Refresh data
+            <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
+            {isRefreshing ? 'Refreshing…' : 'Refresh data'}
           </button>
         </div>
       </div>
 
-      {/* ── 2-column grid ─────────────────────────────────────────────── */}
+      {/* 2-col grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
 
-        {/* Left column */}
+        {/* ── Left: Signal + Price ───────────────────────────────────────── */}
         <div className="space-y-5">
           {/* Signal card */}
-          <div className={`rounded-2xl border p-5 ${latest ? vc.badge.replace('text-', 'border-').replace(/bg-[^ ]+/, 'bg-[#080a0f]/90') : 'border-slate-800 bg-[#080a0f]/90'}`}>
+          <div className={`rounded-2xl border p-5 ${latest ? 'border-slate-700 bg-[#080a0f]/90' : 'border-slate-800 bg-[#080a0f]/90'}`}>
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Investment Signal</div>
             {loading && !latest ? (
-              <div className="space-y-2"><Skeleton h="h-8" w="w-24" /><Skeleton /><Skeleton w="w-3/4" /></div>
+              <div className="space-y-2"><Sk h="h-8" w="w-24" /><Sk /><Sk w="w-3/4" /></div>
             ) : latest ? (
               <>
                 <div className="flex items-center gap-3 mb-4">
                   <div className={`w-3 h-3 rounded-full ${vc.dot}`} />
                   <span className={`text-3xl font-black font-mono tracking-widest ${vc.text}`}>{latest.verdict}</span>
-                  <span className={`ml-auto text-[11px] font-bold uppercase tracking-widest ${confidenceStyle(latest.confidence)}`}>
-                    {latest.confidence} confidence
-                  </span>
+                  <span className={`ml-auto text-[11px] font-bold uppercase tracking-widest ${confidenceStyle(latest.confidence)}`}>{latest.confidence} confidence</span>
                 </div>
                 {latest.key_reasons.length > 0 && (
                   <div className="mb-3">
@@ -669,19 +655,13 @@ function IndividualStockView({
           <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
             <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Market Data</div>
             {loading && !quote ? (
-              <div className="space-y-2"><Skeleton h="h-8" w="w-28" /><Skeleton w="w-1/2" /></div>
+              <div className="space-y-2"><Sk h="h-8" w="w-28" /><Sk w="w-1/2" /></div>
             ) : quote ? (
               <div className="space-y-3">
                 <div className="flex items-end gap-3">
-                  <span className="text-2xl font-black text-white font-mono">
-                    {fmtPrice(quote.regularMarketPrice, quote.currency)}
-                  </span>
+                  <span className="text-2xl font-black text-white font-mono">{fmtPrice(quote.regularMarketPrice, quote.currency)}</span>
                   <span className={`flex items-center gap-1 font-bold text-sm mb-0.5 ${change.cls}`}>
-                    {quote.regularMarketChangePercent !== undefined && (
-                      quote.regularMarketChangePercent >= 0
-                        ? <TrendingUp className="w-4 h-4" />
-                        : <TrendingDown className="w-4 h-4" />
-                    )}
+                    {quote.regularMarketChangePercent != null && (quote.regularMarketChangePercent >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />)}
                     {change.text}
                   </span>
                 </div>
@@ -692,9 +672,7 @@ function IndividualStockView({
                   </div>
                   <div className="bg-slate-900/50 rounded-lg px-3 py-2">
                     <div className="text-[10px] text-slate-600 uppercase tracking-widest">Trailing P/E</div>
-                    <div className="text-sm font-bold text-slate-300 mt-0.5">
-                      {quote.trailingPE ? `${quote.trailingPE.toFixed(1)}x` : '—'}
-                    </div>
+                    <div className="text-sm font-bold text-slate-300 mt-0.5">{quote.trailingPE ? `${quote.trailingPE.toFixed(1)}x` : '—'}</div>
                   </div>
                 </div>
                 {quote.currency && quote.currency !== 'USD' && (
@@ -702,84 +680,77 @@ function IndividualStockView({
                 )}
               </div>
             ) : (
-              <p className="text-sm text-slate-500 italic">No market data — refresh to fetch.</p>
+              <p className="text-sm text-slate-500 italic">No market data — click Refresh data.</p>
             )}
           </div>
         </div>
 
-        {/* Right column */}
+        {/* ── Right: News + Compliance ───────────────────────────────────── */}
         <div className="space-y-5">
-          {/* News signals */}
+          {/* News */}
           <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
             <div className="flex items-center gap-2 mb-3">
               <Globe className="w-4 h-4 text-cyan-400" />
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">News Signals</span>
-              <span className="ml-auto text-[10px] text-slate-600">from last analysis</span>
+              {isRefreshing && <Loader2 className="w-3 h-3 text-blue-400 animate-spin ml-auto" />}
+              {liveEntry?.refreshedAt && !isRefreshing && (
+                <span className="ml-auto text-[10px] text-slate-600">{relTime(liveEntry.refreshedAt)}</span>
+              )}
             </div>
-            {webIntel?.news_signals && webIntel.news_signals.length > 0 ? (
+            {newsSignals.length > 0 ? (
               <div className="space-y-2">
-                {webIntel.news_signals.slice(0, 3).map((item, i) => (
-                  <a
-                    key={i}
-                    href={item.url || undefined}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="block rounded-lg border border-slate-800 bg-slate-950/40 p-3 hover:border-cyan-900/50 transition-colors"
-                  >
+                {newsSignals.slice(0, 3).map((item, i) => (
+                  <a key={i} href={item.url || undefined} target="_blank" rel="noreferrer"
+                    className="block rounded-lg border border-slate-800 bg-slate-950/40 p-3 hover:border-cyan-900/50 transition-colors">
                     <div className="flex items-start justify-between gap-2">
                       <span className="text-xs font-bold text-white leading-snug line-clamp-2">{item.title}</span>
-                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${sentimentStyle(item.sentiment)}`}>
-                        {item.sentiment}
-                      </span>
+                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${sentimentStyle(item.sentiment)}`}>{item.sentiment}</span>
                     </div>
                     {item.snippet && <p className="text-[11px] text-slate-500 mt-1 line-clamp-2 leading-snug">{item.snippet}</p>}
                   </a>
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-slate-600 italic">No news data — run a full analysis to populate.</p>
+              <p className="text-xs text-slate-600 italic">{isRefreshing ? 'Fetching news…' : 'No news data — click Refresh data.'}</p>
             )}
           </div>
 
-          {/* Compliance alerts */}
+          {/* Compliance */}
           <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
             <div className="flex items-center gap-2 mb-3">
               <ShieldAlert className="w-4 h-4 text-rose-400" />
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Compliance Alerts</span>
-              <span className="ml-auto text-[10px] text-slate-600">from last analysis</span>
+              {isRefreshing && <Loader2 className="w-3 h-3 text-blue-400 animate-spin ml-auto" />}
             </div>
-            {compliance?.alerts && compliance.alerts.length > 0 ? (
+            {alerts.length > 0 ? (
               <div className="space-y-2">
-                {compliance.alerts.slice(0, 3).map((alert, i) => (
+                {alerts.slice(0, 3).map((alert, i) => (
                   <div key={i} className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
                     <div className="flex items-start gap-2">
-                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest mt-0.5 ${urgencyStyle(alert.urgency)}`}>
-                        {alert.urgency}
-                      </span>
+                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest mt-0.5 ${urgencyStyle(alert.urgency)}`}>{alert.urgency}</span>
                       <p className="text-xs text-slate-300 leading-snug line-clamp-3">{alert.summary}</p>
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-slate-600 italic">No compliance data — run a full analysis to populate.</p>
+              <p className="text-xs text-slate-600 italic">{isRefreshing ? 'Fetching alerts…' : 'No compliance data — click Refresh data.'}</p>
             )}
           </div>
         </div>
       </div>
 
-      {/* ── Signal history (full width) ─────────────────────────────────── */}
+      {/* Signal history */}
       <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
         <div className="flex items-center gap-2 mb-4">
           <History className="w-4 h-4 text-indigo-400" />
           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Signal History</span>
-          <span className="ml-auto text-[10px] text-slate-600">last 5 signals</span>
+          <span className="ml-auto text-[10px] text-slate-600">last 5</span>
         </div>
         {signalHistory.length === 0 ? (
           <p className="text-xs text-slate-600 italic text-center py-4">No signal history yet.</p>
         ) : (
           <div className="relative">
-            {/* Timeline line */}
             <div className="absolute left-[7px] top-2 bottom-2 w-px bg-slate-800" />
             <div className="space-y-4">
               {signalHistory.slice(0, 5).map((rec, i) => {
@@ -795,9 +766,7 @@ function IndividualStockView({
                           {new Date(rec.created_at || rec.generated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                         </span>
                       </div>
-                      {rec.key_reasons[0] && (
-                        <p className="text-[11px] text-slate-500 mt-0.5 truncate">{rec.key_reasons[0]}</p>
-                      )}
+                      {rec.key_reasons[0] && <p className="text-[11px] text-slate-500 mt-0.5 truncate">{rec.key_reasons[0]}</p>}
                     </div>
                   </div>
                 );
@@ -807,23 +776,15 @@ function IndividualStockView({
         )}
       </div>
 
-      {/* ── Action buttons ──────────────────────────────────────────────── */}
+      {/* Action buttons */}
       <div className="flex flex-wrap items-center gap-3 pb-4">
-        <button
-          onClick={onNavigateToAnalysis}
-          className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-bold transition-all shadow-[0_0_15px_rgba(37,99,235,0.25)]"
-        >
+        <button onClick={onNavigateToAnalysis} className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-bold transition-all shadow-[0_0_15px_rgba(37,99,235,0.25)]">
           <Zap className="w-4 h-4" /> Run Full Analysis
         </button>
-        <button
-          onClick={onNavigateToAnalysis}
-          className="flex items-center gap-2 px-5 py-2.5 border border-slate-700 bg-[#0a0d14] text-slate-300 hover:text-white hover:border-slate-600 rounded-xl text-sm font-bold transition-colors"
-        >
+        <button onClick={onNavigateToAnalysis} className="flex items-center gap-2 px-5 py-2.5 border border-slate-700 bg-[#0a0d14] text-slate-300 hover:text-white hover:border-slate-600 rounded-xl text-sm font-bold transition-colors">
           <ExternalLink className="w-4 h-4" /> View Stakeholder & ESG
         </button>
-        <span className="text-[10px] text-slate-600 ml-auto">
-          Deep analysis available in Market Analysis tab
-        </span>
+        <span className="text-[10px] text-slate-600 ml-auto">Deep analysis available in Market Analysis tab</span>
       </div>
     </div>
   );
@@ -831,9 +792,7 @@ function IndividualStockView({
 
 // ── Summary card ──────────────────────────────────────────────────────────────
 
-function SummaryCard({ label, value, sub, accent, valueClass }: {
-  label: string; value: string; sub: string; accent: string; valueClass?: string;
-}) {
+function SummaryCard({ label, value, sub, accent, valueClass }: { label: string; value: string; sub: string; accent: string; valueClass?: string }) {
   return (
     <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
       <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">{label}</div>

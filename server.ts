@@ -108,6 +108,151 @@ async function startServer() {
     }
   });
 
+  // ── Lightweight refresh endpoint ─────────────────────────────────────────────
+  // POST /api/refresh/:ticker
+  // Fetches live stock price + Bright Data SERP webIntel + compliance in parallel.
+  // Runs server-side so BRIGHTDATA_API_KEY stays out of the browser bundle.
+
+  app.post("/api/refresh/:ticker", async (req, res) => {
+    const { ticker } = req.params;
+
+    const callSerp = async (query: string): Promise<any[]> => {
+      const apiKey = process.env.BRIGHTDATA_API_KEY;
+      const zone   = process.env.BRIGHTDATA_SERP_ZONE || "serp_api1";
+      if (!apiKey) throw new Error("BRIGHTDATA_API_KEY missing");
+      const r = await fetch("https://api.brightdata.com/request", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body:    JSON.stringify({ zone, url: `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10`, format: "json" }),
+      });
+      if (!r.ok) throw new Error(`Bright Data SERP ${r.status}`);
+      const payload = await r.json();
+      // extract organic results from various response shapes
+      for (const key of ["organic", "organic_results"]) {
+        if (Array.isArray(payload?.[key]))            return payload[key];
+        if (Array.isArray(payload?.body?.[key]))      return payload.body[key];
+      }
+      if (typeof payload?.body === "string") {
+        try {
+          const p = JSON.parse(payload.body);
+          for (const key of ["organic", "organic_results"]) if (Array.isArray(p?.[key])) return p[key];
+        } catch {}
+      }
+      return [];
+    };
+
+    const safeSerp = async (query: string): Promise<any[]> => {
+      try { return await callSerp(query); } catch { return []; }
+    };
+
+    const HIGH_URGENCY = /fine|penalty|violation|lawsuit|banned|criminal/i;
+    const MED_URGENCY  = /investigation|inquiry|review|warning|probe/i;
+    const IRRELEVANT   = /predict|prophecy|psychic|astrology|horoscope|baba vanga|vanga|tarot|zodiac/i;
+
+    const classifyUrgency = (text: string): "high" | "medium" | "low" =>
+      HIGH_URGENCY.test(text) ? "high" : MED_URGENCY.test(text) ? "medium" : "low";
+
+    const toNewsSignals = (results: any[], tickerStr: string, companyWord: string) =>
+      results
+        .filter(r => {
+          const combined = `${r.title || ""} ${r.snippet || r.description || ""}`.toLowerCase();
+          return !IRRELEVANT.test(combined) &&
+            (combined.includes(tickerStr.toLowerCase()) || combined.includes(companyWord));
+        })
+        .map(r => ({
+          title:     r.title || "Untitled",
+          url:       r.link || r.url || "",
+          snippet:   r.snippet || r.description || "",
+          date:      r.date || null,
+          sentiment: "neutral" as const,   // LLM classification skipped for lightweight refresh
+        }))
+        .slice(0, 8);
+
+    const toComplianceAlerts = (results: any[], category: string) =>
+      results
+        .map(r => {
+          const text = `${r.title || ""} ${r.snippet || r.description || ""}`.trim();
+          if (!text) return null;
+          return { summary: text, source: r.link || r.url || "", urgency: classifyUrgency(text), date: r.date || null, category };
+        })
+        .filter(Boolean)
+        .slice(0, 5) as any[];
+
+    try {
+      const now = new Date().toISOString();
+
+      // Run all fetches in parallel: stock price + 3 webIntel searches + 3 compliance searches
+      const [quoteResult, r1, r2, r3, c1, c2, c3] = await Promise.allSettled([
+        yahooFinance.quote(ticker).catch(() => null),
+        safeSerp(`${ticker} latest news site:reuters.com OR site:bloomberg.com OR site:wsj.com 2026`),
+        safeSerp(`${ticker} product launch partnership earnings 2026`),
+        safeSerp(`${ticker} analyst rating price target 2026`),
+        safeSerp(`${ticker} SEC regulatory change compliance 2025 2026`),
+        safeSerp(`${ticker} lawsuit litigation fine penalty 2025 2026`),
+        safeSerp(`${ticker} ESG compliance disclosure requirement 2025 2026`),
+      ]);
+
+      const quote = quoteResult.status === "fulfilled" ? quoteResult.value : null;
+      const companyWord = (quote as any)?.longName?.split(" ")[0]?.toLowerCase() || ticker.toLowerCase();
+
+      const allNews = [
+        ...(r1.status === "fulfilled" ? r1.value : []),
+        ...(r2.status === "fulfilled" ? r2.value : []),
+        ...(r3.status === "fulfilled" ? r3.value : []),
+      ];
+      // Deduplicate news by title
+      const seenTitles = new Set<string>();
+      const newsSignals = allNews
+        .filter(r => { const t = (r.title || "").trim().toLowerCase(); if (!t || seenTitles.has(t)) return false; seenTitles.add(t); return true; })
+        .sort((a, b) => (!a.date && !b.date) ? 0 : !a.date ? 1 : !b.date ? -1 : new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, 10);
+
+      const regulatoryAlerts = toComplianceAlerts(c1.status === "fulfilled" ? c1.value : [], "regulatory");
+      const legalAlerts      = toComplianceAlerts(c2.status === "fulfilled" ? c2.value : [], "legal");
+      const esgAlerts        = toComplianceAlerts(c3.status === "fulfilled" ? c3.value : [], "esg_compliance");
+      const allAlerts        = [...regulatoryAlerts, ...legalAlerts, ...esgAlerts];
+
+      const overall_risk: "high" | "medium" | "low" = allAlerts.some(a => a.urgency === "high")
+        ? "high" : allAlerts.some(a => a.urgency === "medium") ? "medium" : "low";
+
+      const dataGaps: string[] = [];
+      if (!process.env.BRIGHTDATA_API_KEY) dataGaps.push("BRIGHTDATA_API_KEY not configured");
+
+      const webIntel = {
+        as_of:            now,
+        data_source:      "brightdata_serp",
+        confidence:       dataGaps.length ? "low" : "high",
+        refresh_interval: "Hourly",
+        ticker,
+        news_signals:     toNewsSignals(newsSignals, ticker, companyWord),
+        hiring_trend:     { signal: "unknown", evidence: "Hiring data not fetched in lightweight refresh." },
+        regulatory_alerts: (c1.status === "fulfilled" ? c1.value : [])
+          .filter((r: any) => /sec|regulation|compliance|filing/i.test(`${r.title || ""} ${r.snippet || ""}`))
+          .slice(0, 4)
+          .map((r: any) => ({ summary: `${r.title || ""} ${r.snippet || ""}`.trim(), urgency: classifyUrgency(`${r.title} ${r.snippet}`), date: r.date || null })),
+        competitive_signals: (r2.status === "fulfilled" ? r2.value : []).slice(0, 5)
+          .map((r: any) => ({ signal: [r.title, r.snippet].filter(Boolean).join(" — "), source: r.link || r.url || "" })),
+        data_gaps: dataGaps,
+      };
+
+      const compliance = {
+        as_of:            now,
+        data_source:      "brightdata_serp",
+        confidence:       dataGaps.length ? "low" : "high",
+        refresh_interval: "Every Monday 09:00",
+        ticker,
+        alerts:           allAlerts,
+        overall_risk,
+        data_gaps:        dataGaps,
+      };
+
+      res.json({ ticker, price: quote, webIntel, compliance, refreshed_at: now });
+    } catch (err: any) {
+      console.error("Refresh error:", err);
+      res.status(500).json({ error: err.message || "Refresh failed" });
+    }
+  });
+
   // API Route: Stock Summary (Financials, Statistics, & Analyst Recommendations)
   app.get("/api/stock/:symbol/summary", async (req, res) => {
     try {
