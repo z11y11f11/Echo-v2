@@ -92,7 +92,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
     competitors: false,
     signalHistory: false,
     ...(sectionOverrides ?? {})
-  });
+  }));
 
   const dashboardRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
