@@ -26,6 +26,10 @@ interface DashboardProps {
   isLoading?: boolean;
   onReset: () => void;
   onError?: (msg: string) => void;
+  /** Optional: override which sections are open/closed. Used by WatchlistDashboard module toggles. */
+  sectionOverrides?: Partial<Record<string, boolean>>;
+  /** Hide the header toolbar (reset, export, stakeholder buttons). Used when Dashboard provides its own chrome. */
+  hideToolbar?: boolean;
 }
 
 // ── Skeleton helpers ──────────────────────────────────────────────────────────
@@ -47,7 +51,7 @@ function SkeletonSection({ rows = 4 }: { rows?: number }) {
   );
 }
 
-export default function AnalysisDashboard({ data, isLoading = false, onReset, onError }: DashboardProps) {
+export default function AnalysisDashboard({ data, isLoading = false, onReset, onError, sectionOverrides, hideToolbar = false }: DashboardProps) {
   // ── Safe defaults ─────────────────────────────────────────────────────────
   const company   = data.company   ?? { name: '—', ticker: '', sector: '' };
   const metrics   = data.metrics   ?? [];
@@ -75,7 +79,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
   const [dashboardView, setDashboardView] = useState<'report' | 'peers'>('report');
   const stakeholder = stakeholderOverride ?? data.stakeholder;
 
-  const [sections, setSections] = useState({
+  const [sections, setSections] = useState(() => ({
     metrics: true,
     history: true,
     valuation: true,
@@ -86,7 +90,8 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
     esg: true,
     stakeholder: true,
     competitors: false,
-    signalHistory: false
+    signalHistory: false,
+    ...(sectionOverrides ?? {})
   });
 
   const dashboardRef = useRef<HTMLDivElement>(null);
@@ -371,7 +376,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-start md:justify-end gap-2 md:max-w-[600px]">
+        {!hideToolbar && <div className="flex flex-wrap items-center justify-start md:justify-end gap-2 md:max-w-[600px]">
           <InvestmentSignalBadge signal={data.investmentSignal ?? null} />
           {stock && (
             <div className="flex flex-col items-end px-4 py-2 bg-[#0a0d14] rounded-xl border border-slate-800 shadow-inner shrink-0">
@@ -414,7 +419,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
           <button onClick={onReset} className="h-10 w-10 flex items-center justify-center text-slate-400 hover:text-white border border-slate-800 hover:bg-slate-800 bg-[#0a0d14] rounded-xl transition-colors shrink-0">
             <RefreshCcw className="w-5 h-5" />
           </button>
-        </div>
+        </div>}
       </header>
 
       {isStakeholderModalOpen && (

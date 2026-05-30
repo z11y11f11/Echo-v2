@@ -1,13 +1,22 @@
 import React, { useState } from 'react';
-import { Shield, BarChart3, FileSearch, MessageSquare } from 'lucide-react';
+import { Shield, BarChart3, FileSearch, MessageSquare, LayoutDashboard } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ModeA from './components/ModeA';
 import ModeB from './components/ModeB';
 import ModeC from './components/ModeC';
+import WatchlistDashboard from './components/WatchlistDashboard';
 
-type Mode = 'A' | 'B' | 'C';
+type Mode = 'D' | 'A' | 'B' | 'C';
 
 const TABS = [
+  {
+    id: 'D' as Mode,
+    label: 'Dashboard',
+    sublabel: 'Watchlist & Monitor',
+    icon: LayoutDashboard,
+    activeClass: 'bg-violet-500/10 text-violet-400 ring-1 ring-violet-500/20',
+    borderClass: 'border-violet-500 text-violet-400',
+  },
   {
     id: 'A' as Mode,
     label: 'Market Analysis',
@@ -35,7 +44,7 @@ const TABS = [
 ] as const;
 
 export default function App() {
-  const [mode, setMode] = useState<Mode>('A');
+  const [mode, setMode] = useState<Mode>('D');
 
   return (
     <div className="flex h-screen w-full bg-[#02040a] text-slate-300 font-sans overflow-hidden">
@@ -55,7 +64,7 @@ export default function App() {
           </div>
 
           {/* Mode nav */}
-          <div className="mb-2 px-3 text-[10px] font-bold text-slate-600 uppercase tracking-widest">Analysis Mode</div>
+          <div className="mb-2 px-3 text-[10px] font-bold text-slate-600 uppercase tracking-widest">Navigation</div>
           <nav className="space-y-1">
             {TABS.map(tab => {
               const Icon = tab.icon;
@@ -133,6 +142,7 @@ export default function App() {
             transition={{ duration: 0.12 }}
             className="flex-1 flex flex-col overflow-hidden"
           >
+            {mode === 'D' && <WatchlistDashboard />}
             {mode === 'A' && <ModeA />}
             {mode === 'B' && <ModeB />}
             {mode === 'C' && <ModeC />}
