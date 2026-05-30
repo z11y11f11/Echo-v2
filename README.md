@@ -2,7 +2,7 @@
 
 **Autonomous multi-agent financial intelligence system — real-time web data, PDF reports, live market signals, and AI-powered synthesis in one dashboard.**
 
-Built for the **Web Data UNLOCKED Hackathon 2026** · Powered by Bright Data · Gemini · OpenAI GPT-4o · Featherless
+Built for the **Web Data UNLOCKED Hackathon 2026** · Powered by Bright Data · Gemini · OpenAI GPT-4o
 
 ---
 
@@ -36,6 +36,10 @@ Echo is a financial intelligence platform that helps investors make data-driven 
 - **Mode A — Market Analysis** — enter any ticker for instant multi-agent analysis
 - **Mode B — Report Analysis** — upload a PDF financial report for fundamental + market cross-analysis
 - **Mode C — AI Dialogue** — describe what you want in plain language, Orchestrator dispatches agents automatically
+
+### AI Chat Analysis Assistant
+- Natural-language AI chat helps clients analyze portfolios, tickers, and uploaded reports with guided multi-agent reasoning
+- Orchestrator asks clarifying questions, selects the right agents, and returns structured, actionable conclusions
 
 ---
 
@@ -113,9 +117,6 @@ Create a `.env` file:
 GEMINI_API_KEY=your_gemini_api_key
 OPENAI_API_KEY=your_openai_api_key
 
-# Optional: open-source model inference via Featherless
-FEATHERLESS_API_KEY=your_featherless_api_key
-
 # Bright Data — live web intelligence
 BRIGHTDATA_API_KEY=your_brightdata_api_key
 BRIGHTDATA_SERP_ZONE=serp_api1
@@ -135,7 +136,7 @@ npm run dev    # starts on http://localhost:3000
 |---|---|
 | Frontend | React 18, Vite, Tailwind CSS, Lucide icons |
 | Backend | Express (ESM), TypeScript |
-| LLM providers | Google Gemini 1.5 Pro, OpenAI GPT-4o, Featherless |
+| LLM providers | Google Gemini 1.5 Pro, OpenAI GPT-4o |
 | Market data | Yahoo Finance (yahoo-finance2) |
 | Web intelligence | Bright Data SERP API |
 | PDF extraction | pdf-parse |
