@@ -72,7 +72,7 @@ type RefreshStatus = 'idle' | 'refreshing' | 'error';
 const LS_WATCHLIST = 'echo_watchlist_v2';
 
 const DEFAULT_WATCHLIST: WatchlistItem[] = [
-  'AAPL', 'MSFT', 'TSLA', 'NVDA', 'COIN', '9988.HK', '1810.HK'
+  'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA'
 ].map(ticker => ({ ticker, addedAt: new Date().toISOString() }));
 
 function loadWatchlist(): WatchlistItem[] {
