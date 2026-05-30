@@ -19,9 +19,11 @@ import {
   Plus, X, RefreshCw, TrendingUp, TrendingDown,
   AlertTriangle, CheckCircle2, Clock,
   ExternalLink, Loader2, ShieldAlert, Globe,
-  History, Zap
+  History, Zap, RefreshCcw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { CIOAgent } from '../agents/CIOAgent';
+import { saveAnalysisLog } from '../utils/db';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -69,8 +71,15 @@ type RefreshStatus = 'idle' | 'refreshing' | 'error';
 
 const LS_WATCHLIST = 'echo_watchlist_v2';
 
+const DEFAULT_WATCHLIST: WatchlistItem[] = [
+  'AAPL', 'MSFT', 'TSLA', 'NVDA', 'COIN', '9988.HK', '1810.HK'
+].map(ticker => ({ ticker, addedAt: new Date().toISOString() }));
+
 function loadWatchlist(): WatchlistItem[] {
-  try { return JSON.parse(localStorage.getItem(LS_WATCHLIST) || '[]'); } catch { return []; }
+  try {
+    const stored = JSON.parse(localStorage.getItem(LS_WATCHLIST) || '[]');
+    return Array.isArray(stored) && stored.length > 0 ? stored : DEFAULT_WATCHLIST;
+  } catch { return DEFAULT_WATCHLIST; }
 }
 function saveWatchlist(items: WatchlistItem[]) {
   localStorage.setItem(LS_WATCHLIST, JSON.stringify(items));
@@ -174,6 +183,8 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
   const [addInput, setAddInput] = useState('');
   const [addOpen,  setAddOpen]  = useState(false);
   const [addError, setAddError] = useState('');
+  const [refreshAllActive, setRefreshAllActive] = useState(false);
+  const [refreshAllCurrent, setRefreshAllCurrent] = useState<string>('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Persist watchlist
@@ -243,6 +254,82 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
       setTimeout(() => setRefreshStatus(prev => ({ ...prev, [ticker]: 'idle' })), 4000);
     }
   }, []);
+
+  // ── Portfolio-mode refresh: risk news + compliance + CIOAgent signal ──────────
+
+  const portfolioRefreshTicker = useCallback(async (ticker: string) => {
+    setRefreshStatus(prev => ({ ...prev, [ticker]: 'refreshing' }));
+    try {
+      const res = await fetch(`/api/portfolio-refresh/${encodeURIComponent(ticker)}`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      // Update price
+      if (data.price) {
+        const q = data.price;
+        setQuotes(prev => ({ ...prev, [ticker]: {
+          regularMarketPrice: q.regularMarketPrice,
+          regularMarketChangePercent: q.regularMarketChangePercent,
+          currency: q.currency, longName: q.longName || q.shortName,
+          marketCap: q.marketCap, trailingPE: q.trailingPE,
+        }}));
+      }
+
+      // Update live data
+      const entry: LiveEntry = {
+        webIntel:    data.webIntel   ?? {},
+        compliance:  data.compliance ?? {},
+        refreshedAt: data.refreshed_at ?? new Date().toISOString(),
+      };
+      setLiveData(prev => ({ ...prev, [ticker]: entry }));
+      persistLiveData(ticker, entry);
+
+      // Generate updated investment signal via CIOAgent
+      try {
+        const companyName = data.price?.longName || data.price?.shortName || ticker;
+        const context = {
+          company: { ticker, name: companyName },
+          webIntel: entry.webIntel,
+          compliance: entry.compliance,
+        };
+        const signal = await CIOAgent.generateInvestmentSignal(context);
+        if (signal) {
+          // Prepend to signals list so it shows as latest
+          setSignals(prev => ({
+            ...prev,
+            [ticker]: [
+              { ...signal, created_at: signal.generated_at },
+              ...(prev[ticker] || [])
+            ]
+          }));
+          saveAnalysisLog(ticker, signal, companyName);
+        }
+      } catch (sigErr) {
+        console.warn(`[portfolioRefresh] CIOAgent signal failed for ${ticker}:`, sigErr);
+        // Non-fatal — price + webIntel + compliance already updated
+      }
+
+      setRefreshStatus(prev => ({ ...prev, [ticker]: 'idle' }));
+    } catch (e: any) {
+      console.error(`[PortfolioRefresh] ${ticker}:`, e);
+      setRefreshStatus(prev => ({ ...prev, [ticker]: 'error' }));
+      setTimeout(() => setRefreshStatus(prev => ({ ...prev, [ticker]: 'idle' })), 4000);
+    }
+  }, []);
+
+  // ── Refresh All: serial to avoid API overload ────────────────────────────────
+
+  const refreshAllTickers = useCallback(async () => {
+    if (refreshAllActive) return;
+    setRefreshAllActive(true);
+    const tickers = watchlist.map(w => w.ticker);
+    for (const t of tickers) {
+      setRefreshAllCurrent(t);
+      await portfolioRefreshTicker(t);
+    }
+    setRefreshAllCurrent('');
+    setRefreshAllActive(false);
+  }, [watchlist, refreshAllActive, portfolioRefreshTicker]);
 
   // On mount: fetch all tickers + load cached liveData from localStorage
   useEffect(() => {
@@ -337,7 +424,10 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
                 addError={addError} setAddError={setAddError} inputRef={inputRef}
                 onAddTicker={addTicker} onRemoveTicker={removeTicker}
                 onSelectTicker={openStockTab}
-                onRefresh={ticker => { fetchTickerData(ticker); refreshTicker(ticker); }}
+                onRefresh={portfolioRefreshTicker}
+                onRefreshAll={refreshAllTickers}
+                refreshAllActive={refreshAllActive}
+                refreshAllCurrent={refreshAllCurrent}
               />
             </motion.div>
           ) : (
@@ -350,7 +440,7 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
                 loading={loadingTickers.has(activeView)}
                 refreshStatus={refreshStatus[activeView] ?? 'idle'}
                 onNavigateToAnalysis={onNavigateToAnalysis}
-                onRefresh={() => { fetchTickerData(activeView); refreshTicker(activeView); }}
+                onRefresh={() => refreshTicker(activeView)}
               />
             </motion.div>
           )}
@@ -380,6 +470,9 @@ interface PortfolioViewProps {
   onRemoveTicker: (t: string) => void;
   onSelectTicker: (t: string) => void;
   onRefresh: (t: string) => void;
+  onRefreshAll: () => void;
+  refreshAllActive: boolean;
+  refreshAllCurrent: string;
 }
 
 function PortfolioView({
@@ -387,6 +480,7 @@ function PortfolioView({
   signalCounts, totalHoldings, activeAlerts,
   addInput, setAddInput, addOpen, setAddOpen, addError, setAddError,
   inputRef, onAddTicker, onRemoveTicker, onSelectTicker, onRefresh,
+  onRefreshAll, refreshAllActive, refreshAllCurrent,
 }: PortfolioViewProps) {
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
@@ -414,9 +508,24 @@ function PortfolioView({
 
       {/* Holdings table */}
       <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl overflow-hidden">
-        <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+        <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between gap-3">
           <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Holdings</span>
-          {watchlist.length > 0 && <span className="text-[10px] text-slate-600">{watchlist.length} ticker{watchlist.length !== 1 ? 's' : ''}</span>}
+          <div className="flex items-center gap-2 ml-auto">
+            {refreshAllActive && refreshAllCurrent && (
+              <span className="text-[10px] text-blue-400 font-mono">Refreshing {refreshAllCurrent}…</span>
+            )}
+            {watchlist.length > 0 && (
+              <button
+                onClick={onRefreshAll}
+                disabled={refreshAllActive}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-lg border border-slate-700 bg-slate-900 text-[11px] font-bold text-slate-400 hover:text-white hover:border-blue-500/40 transition-colors disabled:opacity-40"
+              >
+                <RefreshCcw className={`w-3 h-3 ${refreshAllActive ? 'animate-spin text-blue-400' : ''}`} />
+                Refresh All
+              </button>
+            )}
+            {watchlist.length > 0 && <span className="text-[10px] text-slate-600">{watchlist.length} ticker{watchlist.length !== 1 ? 's' : ''}</span>}
+          </div>
         </div>
         {watchlist.length === 0 ? (
           <div className="px-6 py-12 text-center">

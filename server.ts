@@ -108,7 +108,116 @@ async function startServer() {
     }
   });
 
-  // ── Lightweight refresh endpoint ─────────────────────────────────────────────
+  // ── Portfolio-mode refresh endpoint ──────────────────────────────────────────
+  // POST /api/portfolio-refresh/:ticker
+  // Risk-focused lightweight refresh: negative news + compliance only.
+  // Intentionally narrow search queries to surface risks quickly.
+
+  app.post("/api/portfolio-refresh/:ticker", async (req, res) => {
+    const { ticker } = req.params;
+
+    const callSerpLocal = async (query: string): Promise<any[]> => {
+      const apiKey = process.env.BRIGHTDATA_API_KEY;
+      const zone   = process.env.BRIGHTDATA_SERP_ZONE || "serp_api1";
+      if (!apiKey) throw new Error("BRIGHTDATA_API_KEY missing");
+      const r = await fetch("https://api.brightdata.com/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body:   JSON.stringify({ zone, url: `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10`, format: "json" }),
+      });
+      if (!r.ok) throw new Error(`Bright Data SERP ${r.status}`);
+      const payload = await r.json();
+      for (const key of ["organic", "organic_results"]) {
+        if (Array.isArray(payload?.[key])) return payload[key];
+        if (Array.isArray(payload?.body?.[key])) return payload.body[key];
+      }
+      if (typeof payload?.body === "string") {
+        try {
+          const p = JSON.parse(payload.body);
+          for (const key of ["organic", "organic_results"]) if (Array.isArray(p?.[key])) return p[key];
+        } catch {}
+      }
+      return [];
+    };
+    const safeSerpLocal = async (q: string) => { try { return await callSerpLocal(q); } catch { return []; } };
+
+    const HIGH_URGENCY_P = /fine|penalty|violation|lawsuit|banned|criminal/i;
+    const MED_URGENCY_P  = /investigation|inquiry|review|warning|probe/i;
+    const classifyP = (t: string): "high" | "medium" | "low" =>
+      HIGH_URGENCY_P.test(t) ? "high" : MED_URGENCY_P.test(t) ? "medium" : "low";
+
+    try {
+      const now = new Date().toISOString();
+      const [quoteResult, risk1, risk2, c1, c2, c3] = await Promise.allSettled([
+        yahooFinance.quote(ticker).catch(() => null),
+        // Risk-focused news queries
+        safeSerpLocal(`${ticker} risk warning lawsuit regulation 2026`),
+        safeSerpLocal(`${ticker} bad news negative outlook downgrade 2026`),
+        // Compliance queries (same as full refresh)
+        safeSerpLocal(`${ticker} SEC regulatory change compliance 2025 2026`),
+        safeSerpLocal(`${ticker} lawsuit litigation fine penalty 2025 2026`),
+        safeSerpLocal(`${ticker} ESG compliance disclosure requirement 2025 2026`),
+      ]);
+
+      const quote = quoteResult.status === "fulfilled" ? quoteResult.value : null;
+      const companyWord = (quote as any)?.longName?.split(" ")[0]?.toLowerCase() || ticker.toLowerCase();
+      const tickerLower = ticker.toLowerCase();
+
+      // Merge + deduplicate risk news
+      const riskRaw = [
+        ...(risk1.status === "fulfilled" ? risk1.value : []),
+        ...(risk2.status === "fulfilled" ? risk2.value : []),
+      ];
+      const seenR = new Set<string>();
+      const riskNews = riskRaw
+        .filter(r => {
+          const combined = `${r.title || ""} ${r.snippet || ""}`.toLowerCase();
+          const t = (r.title || "").trim().toLowerCase();
+          if (!t || seenR.has(t)) return false;
+          seenR.add(t);
+          return combined.includes(tickerLower) || combined.includes(companyWord);
+        })
+        .sort((a, b) => (!a.date && !b.date) ? 0 : !a.date ? 1 : !b.date ? -1 : new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, 8)
+        .map(r => ({
+          title: r.title || "Untitled", url: r.link || r.url || "",
+          snippet: r.snippet || r.description || "", date: r.date || null,
+          sentiment: "negative" as const,  // risk-focused — assume negative
+        }));
+
+      const toAlerts = (res: any[], cat: string) =>
+        (res || []).map(r => {
+          const text = `${r.title || ""} ${r.snippet || r.description || ""}`.trim();
+          if (!text) return null;
+          return { summary: text, source: r.link || r.url || "", urgency: classifyP(text), date: r.date || null, category: cat };
+        }).filter(Boolean).slice(0, 5) as any[];
+
+      const allAlerts = [
+        ...toAlerts(c1.status === "fulfilled" ? c1.value : [], "regulatory"),
+        ...toAlerts(c2.status === "fulfilled" ? c2.value : [], "legal"),
+        ...toAlerts(c3.status === "fulfilled" ? c3.value : [], "esg_compliance"),
+      ];
+
+      const overall_risk: "high" | "medium" | "low" = allAlerts.some(a => a.urgency === "high")
+        ? "high" : allAlerts.some(a => a.urgency === "medium") ? "medium" : "low";
+
+      const dataGaps: string[] = [];
+      if (!process.env.BRIGHTDATA_API_KEY) dataGaps.push("BRIGHTDATA_API_KEY not configured");
+
+      res.json({
+        ticker,
+        price: quote,
+        webIntel:   { as_of: now, data_source: "brightdata_serp", confidence: dataGaps.length ? "low" : "high", refresh_interval: "Hourly", ticker, news_signals: riskNews, data_gaps: dataGaps },
+        compliance: { as_of: now, data_source: "brightdata_serp", confidence: dataGaps.length ? "low" : "high", refresh_interval: "Every Monday 09:00", ticker, alerts: allAlerts, overall_risk, data_gaps: dataGaps },
+        refreshed_at: now,
+      });
+    } catch (err: any) {
+      console.error("Portfolio refresh error:", err);
+      res.status(500).json({ error: err.message || "Portfolio refresh failed" });
+    }
+  });
+
+  // ── Full refresh endpoint ─────────────────────────────────────────────────────
   // POST /api/refresh/:ticker
   // Fetches live stock price + Bright Data SERP webIntel + compliance in parallel.
   // Runs server-side so BRIGHTDATA_API_KEY stays out of the browser bundle.
