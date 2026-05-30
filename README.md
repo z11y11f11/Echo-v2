@@ -87,6 +87,10 @@ FEATHERLESS_MODEL=mistralai/Mistral-7B-Instruct-v0.3   # default
 # Optional: live web intelligence via Bright Data SERP
 BRIGHTDATA_API_KEY=your_brightdata_api_key
 BRIGHTDATA_SERP_ZONE=serp_api1
+
+# Optional: portfolio alert emails via Resend
+RESEND_API_KEY=your_resend_api_key
+ALERT_FROM_EMAIL="Echo Alerts <alerts@your-domain.com>"
 ```
 
 **Provider priority**: Featherless (if key set) → OpenAI → Gemini. The Orchestrator dialogue and tool-planning always use OpenAI (requires function calling).

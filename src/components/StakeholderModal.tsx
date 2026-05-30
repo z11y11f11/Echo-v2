@@ -230,13 +230,14 @@ function EntitySection({ icon, label, hint, entities, onSelectEntity, onClose }:
           <p className="text-xs text-slate-600 italic px-4 py-4 text-center">No data available</p>
         ) : (
           entities.map((entity, i) => (
-            <EntityRow
-              key={`${entity.type}-${entity.name}-${i}`}
-              index={i + 1}
-              entity={entity}
-              onSelectEntity={onSelectEntity}
-              onClose={onClose}
-            />
+            <React.Fragment key={`${entity.type}-${entity.name}-${i}`}>
+              <EntityRow
+                index={i + 1}
+                entity={entity}
+                onSelectEntity={onSelectEntity}
+                onClose={onClose}
+              />
+            </React.Fragment>
           ))
         )}
       </div>
