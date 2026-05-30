@@ -37,10 +37,6 @@ Echo is a financial intelligence platform that helps investors make data-driven 
 - **Mode B — Report Analysis** — upload a PDF financial report for fundamental + market cross-analysis
 - **Mode C — AI Dialogue** — describe what you want in plain language, Orchestrator dispatches agents automatically
 
-### AI Chat Analysis Assistant
-- Natural-language AI chat helps clients analyze portfolios, tickers, and uploaded reports with guided multi-agent reasoning
-- Orchestrator asks clarifying questions, selects the right agents, and returns structured, actionable conclusions
-
 ---
 
 ## Architecture
