@@ -8,6 +8,13 @@
 
 | Date | What changed | Why |
 | --- | --- | --- |
+| 2026-05-30 | Default watchlist seeded in WatchlistDashboard: AAPL, MSFT, TSLA, NVDA, COIN, 9988.HK, 1810.HK. Shown when localStorage is empty so new users see a populated dashboard immediately. | Empty dashboard was confusing for first-time users with no context on how to use it. |
+| 2026-05-30 | Two distinct Portfolio refresh modes. Portfolio row refresh button and Refresh All call `POST /api/portfolio-refresh/:ticker` (risk-focused: "risk warning lawsuit regulation" + "bad news negative outlook" + 3 compliance searches). After server response, client calls `CIOAgent.generateInvestmentSignal()` with fresh context and persists new signal. Individual stock Refresh data button calls full `POST /api/refresh/:ticker` (broad news). Refresh All button added to Holdings header: serial loop through all tickers with "Refreshing TICKER…" status. | Portfolio refresh was calling the full analysis endpoint; risk/compliance-only refresh is faster and more appropriate for monitoring. |
+| 2026-05-30 | WatchlistDashboard redesigned as two-view monitoring page. View 1 (Portfolio): 3 summary cards (Total Holdings, Active Alerts, Signals BUY/HOLD/SELL) + holdings table (Ticker, Company, Price, Change, Signal, Alerts, Last Updated). View 2 (Individual stock): 2-col grid with Signal card + Price card (left) and News + Compliance (right), Signal History timeline (bottom), action buttons. Inner tab bar with [ Portfolio ] + per-ticker tabs. Watchlist + module toggles persisted in localStorage. | Provides a monitoring-first view separate from the deep-analysis modes (A/B/C). |
+| 2026-05-30 | Orchestrator.persistToLocalStorage(): writes webIntel and compliance to localStorage keys `echo_webintel_{ticker}` and `echo_compliance_{ticker}` after every completed analysis. Dashboard reads from these keys on mount so cached data is available without re-running a full analysis. | Dashboard had no data to show for tickers that were analysed in Mode A/B/C before the Dashboard was opened. |
+| 2026-05-30 | `POST /api/refresh/:ticker` server endpoint: parallel fetch of Yahoo Finance price + 7 Bright Data SERP searches (3 broad news + 3 compliance). Returns `{ ticker, price, webIntel, compliance, refreshed_at }`. Urgency classified server-side by keyword regex; news deduplicated + relevance-filtered. No LLM calls in this endpoint. | Enables live data refresh from the Dashboard without running the full multi-agent analysis pipeline. |
+| 2026-05-30 | WatchlistDashboard data model fix: webIntel/compliance now held in React state (`liveData`) not read from localStorage in render. On mount, `loadCachedLiveData()` initialises from localStorage. After any refresh, updates state + writes back to localStorage. Fixes Refresh data button having no visible effect. | Reading localStorage directly in render never triggers re-renders; React state is required. |
+| 2026-05-30 | AnalysisDashboard gains `sectionOverrides` prop (lazy-initialised into `sections` state) and `hideToolbar` prop. Used by WatchlistDashboard module toggles to show/hide individual sections. | Allows Dashboard to control which AnalysisDashboard sections are visible without modifying internal state. |
 | 2026-05-30 | StakeholderModal: translated all remaining Chinese UI strings to English — Step 1/2/3 titles, descriptions, Comprehensive mode button, CircleHelp tooltip. Candidate display columns capped at 3 per type in the modal view. | App is for an international audience; Chinese strings were inconsistent. |
 | 2026-05-30 | StakeholderAgent.identifyTopIndustries: deduplicate `top_industries` by industry name, keeping only the entry with the most recent period (e.g. FY2024 wins over FY2022 for the same industry). | Industry list was showing duplicate rows for the same segment across multiple years. |
 | 2026-05-30 | Unified candidate count to top 3 per type (upstream 3 + downstream 3 + peers 3 = max 9). Changed `perIndustryLimit = 3` and all `takeSortedByType` limits from 5 → 3 in StakeholderAgent. | Previously inconsistent: comprehensive mode returned 3, specific mode returned 5. |
@@ -134,6 +141,39 @@ On timeout the agent emits a status event and returns an empty partial — analy
 - Every completed analysis with an `investmentSignal` is persisted to SQLite `analysis_log` via `saveAnalysisLog()`.
 - `SignalTimeline` component (`src/components/SignalTimeline.tsx`) fetches `/api/log/history/:ticker` and renders a collapsible timeline.
 - Server routes: `POST /api/log/analysis`, `GET /api/log/analysis/:ticker` (alias: `GET /api/log/history/:ticker`), `POST /api/log/validation`.
+
+### WatchlistDashboard architecture
+
+**Views:**
+- `portfolio` — default; summary cards + holdings table + Refresh All
+- `{ticker}` — individual stock tab; Signal card + Price card + News + Compliance + Signal History
+
+**State model:**
+- `watchlist` — persisted in localStorage (`echo_watchlist_v2`); default seeds AAPL MSFT TSLA NVDA COIN 9988.HK 1810.HK if empty
+- `quotes` — Yahoo Finance price data per ticker (React state)
+- `signals` — signal history per ticker from `/api/log/history/:ticker` (React state)
+- `liveData` — webIntel + compliance per ticker (React state, not localStorage reads in render)
+  - Initialised from localStorage on mount via `loadCachedLiveData()`
+  - Updated after every refresh; written back to localStorage via `persistLiveData()`
+
+**Refresh modes:**
+| Mode | Endpoint | Queries | CIOAgent |
+|---|---|---|---|
+| Portfolio row / Refresh All | `POST /api/portfolio-refresh/:ticker` | Risk-focused (warning/lawsuit/regulation + bad news) + 3 compliance | ✅ client-side after |
+| Individual stock Refresh data | `POST /api/refresh/:ticker` | Broad news (Reuters/Bloomberg/WSJ + product + analyst) + 3 compliance | ❌ |
+| Full analysis (Mode A/B/C) | Orchestrator pipeline | All agents | ✅ |
+
+**Refresh All:** serial loop — one ticker at a time to avoid Bright Data rate limits.
+
+**localStorage keys:**
+- `echo_watchlist_v2` — watchlist items
+- `echo_webintel_{ticker}` — latest WebIntelOutput (written by Orchestrator + refresh endpoints)
+- `echo_compliance_{ticker}` — latest ComplianceOutput (written by Orchestrator + refresh endpoints)
+
+**Server endpoints for Dashboard:**
+- `POST /api/portfolio-refresh/:ticker` — risk-focused news + compliance + Yahoo Finance price
+- `POST /api/refresh/:ticker` — broad news + compliance + Yahoo Finance price
+- `GET /api/log/history/:ticker` — signal history (alias for `/api/log/analysis/:ticker`)
 
 ### Agent registry (one-line responsibilities)
 - **FundamentalAgent** — extracts financials, metrics, highlights, risks, and ticker from PDF reports
