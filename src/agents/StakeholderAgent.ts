@@ -8,6 +8,7 @@ import type {
   StakeholderOutput
 } from "../types";
 import { validateAgentOutput } from "../utils/validateOutput";
+import { deduplicateBySymbol } from "../utils/entityNormalizer";
 
 interface StakeholderAgentInput {
   ticker: string;
@@ -26,7 +27,7 @@ interface StakeholderSelectionInput {
   selectedEntityKeys?: string[];
 }
 
-const REFRESH_INTERVAL = "每周一 09:00";
+const REFRESH_INTERVAL = "Every Monday 09:00";
 
 export class StakeholderAgent {
   static async getTopIndustries(ticker: string): Promise<IndustryRevenue[]> {
@@ -196,14 +197,17 @@ export class StakeholderAgent {
     );
     const flattened = allCandidates.flat();
 
+    // Normalize and deduplicate by Yahoo Finance symbol
+    const deduped = await deduplicateBySymbol(flattened);
+
     if (selectionMode === "specific") {
-      return flattened;
+      return deduped;
     }
 
     return [
-      ...this.takeSortedByType(flattened, "upstream", 5),
-      ...this.takeSortedByType(flattened, "downstream", 5),
-      ...this.takeSortedByType(flattened, "peer", 5)
+      ...this.takeSortedByType(deduped, "upstream", 5),
+      ...this.takeSortedByType(deduped, "downstream", 5),
+      ...this.takeSortedByType(deduped, "peer", 5)
     ];
   }
 

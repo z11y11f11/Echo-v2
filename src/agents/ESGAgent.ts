@@ -10,7 +10,7 @@ interface ESGAgentInput {
 
 type ESGTheme = "environmental" | "social" | "governance";
 
-const REFRESH_INTERVAL = "每季度首个工作日 09:00";
+const REFRESH_INTERVAL = "First business day of each quarter";
 
 const ESG_KEYWORDS = [
   "esg",

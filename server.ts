@@ -2,13 +2,54 @@ import multer from "multer";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdfExtract = require("pdf-extraction");
+const BetterSqlite3 = require("better-sqlite3");
 
 import express from "express";
 import path from "path";
+import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import cors from "cors";
 import YahooFinance from "yahoo-finance2";
 import dotenv from "dotenv";
+
+// ── SQLite setup ──────────────────────────────────────────────────────────────
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const dbPath = path.join(__dirname, "echo.db");
+const db = new BetterSqlite3(dbPath);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS analysis_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker       TEXT NOT NULL,
+    company_name TEXT,
+    verdict      TEXT,
+    confidence   TEXT,
+    key_reasons  TEXT,
+    risk_warnings TEXT,
+    as_of        TEXT,
+    created_at   TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS validation_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent     TEXT NOT NULL,
+    warnings  TEXT NOT NULL,
+    timestamp TEXT NOT NULL
+  );
+`);
+
+const insertAnalysis = db.prepare(`
+  INSERT INTO analysis_log (ticker, company_name, verdict, confidence, key_reasons, risk_warnings, as_of, created_at)
+  VALUES (@ticker, @company_name, @verdict, @confidence, @key_reasons, @risk_warnings, @as_of, @created_at)
+`);
+
+const selectAnalysisByTicker = db.prepare(`
+  SELECT * FROM analysis_log WHERE ticker = ? ORDER BY created_at DESC
+`);
+
+const insertValidation = db.prepare(`
+  INSERT INTO validation_log (agent, warnings, timestamp) VALUES (?, ?, ?)
+`);
 
 const yahooFinance = new YahooFinance();
 
@@ -136,6 +177,58 @@ async function startServer() {
     } catch (error: any) {
       console.error("Extraction error details:", error);
       res.status(500).json({ error: "Failed to extract text: " + error.message });
+    }
+  });
+
+  // ── Logging API ────────────────────────────────────────────────────────────
+
+  // POST /api/log/analysis — persist InvestmentSignal for a ticker
+  app.post("/api/log/analysis", (req, res) => {
+    try {
+      const { ticker, signal, companyName } = req.body;
+      if (!ticker || !signal) return res.status(400).json({ error: "ticker and signal required" });
+      insertAnalysis.run({
+        ticker,
+        company_name: companyName || "",
+        verdict: signal.verdict,
+        confidence: signal.confidence,
+        key_reasons: JSON.stringify(signal.key_reasons || []),
+        risk_warnings: JSON.stringify(signal.risk_warnings || []),
+        as_of: signal.generated_at || new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      });
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("log/analysis error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /api/log/analysis/:ticker — retrieve history for a ticker
+  app.get("/api/log/analysis/:ticker", (req, res) => {
+    try {
+      const rows = selectAnalysisByTicker.all(req.params.ticker) as any[];
+      const signals = rows.map(row => ({
+        verdict: row.verdict,
+        confidence: row.confidence,
+        key_reasons: JSON.parse(row.key_reasons || "[]"),
+        risk_warnings: JSON.parse(row.risk_warnings || "[]"),
+        generated_at: row.as_of,
+      }));
+      res.json(signals);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/log/validation — persist agent validation warnings
+  app.post("/api/log/validation", (req, res) => {
+    try {
+      const { agent, warnings, timestamp } = req.body;
+      insertValidation.run(agent || "unknown", JSON.stringify(warnings || []), timestamp || new Date().toISOString());
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 

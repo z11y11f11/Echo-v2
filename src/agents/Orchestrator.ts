@@ -1,10 +1,12 @@
 import { AnalysisResult, CrossAnalysisResult, ValuationSummary, ValuationVerdictResult } from "../types";
+import { saveAnalysisLog } from "../utils/db";
 import { FundamentalAgent } from "./FundamentalAgent";
 import { QuantAgent } from "./QuantAgent";
 import { PeerAgent } from "./PeerAgent";
 import { ESGAgent } from "./ESGAgent";
 import { StakeholderAgent } from "./StakeholderAgent";
 import { WebIntelAgent } from "./WebIntelAgent";
+import { ComplianceAlertAgent } from "./ComplianceAlertAgent";
 import { CIOAgent } from "./CIOAgent";
 import { OrchestratorToolCall, planOrchestratorToolCalls } from "./LLMProvider";
 
@@ -68,6 +70,9 @@ export class OrchestratorAgent {
       await this.fillGapsWithKnowledge(gaps, result, input, onEvent);
     }
 
+    if ((result as any).investmentSignal && result.company?.ticker) {
+      saveAnalysisLog(result.company.ticker, (result as any).investmentSignal, result.company.name || "");
+    }
     onEvent({ agent: "Orchestrator", status: "Analysis Complete" });
     return result as AnalysisResult;
   }
@@ -154,9 +159,10 @@ export class OrchestratorAgent {
       case "fetch_market_data": {
         const ticker = toolCall.arguments.ticker || input.ticker;
         if (!ticker) { onEvent({ agent: "QuantAgent", status: "Skipped: no ticker available" }); return {}; }
-        onEvent({ agent: "Orchestrator", status: "Calling fetch_market_data → QuantAgent + WebIntelAgent" });
+        onEvent({ agent: "Orchestrator", status: "Calling fetch_market_data → QuantAgent + WebIntelAgent + ComplianceAlertAgent" });
         try {
-          const [quantRes, webIntelRes] = await Promise.all([
+          const companyName = currentResult.company?.name || input.userRequest || ticker;
+          const [quantRes, webIntelRes, complianceRes] = await Promise.all([
             QuantAgent.runAutonomousAnalysis(
               ticker, toolCall.arguments.options || input.options,
               (s) => onEvent({ agent: "QuantAgent", status: s.replace("QuantAgent: ", "") })
@@ -164,17 +170,20 @@ export class OrchestratorAgent {
               onEvent({ agent: "QuantAgent", status: `Failed: ${e.message}` });
               return {} as Partial<AnalysisResult>;
             }),
-            WebIntelAgent.run({
-              ticker,
-              companyName: currentResult.company?.name || input.userRequest || ticker
-            }, onEvent)
+            WebIntelAgent.run({ ticker, companyName }, onEvent)
               .then(webIntel => ({ webIntel } as Partial<AnalysisResult>))
               .catch((e: any) => {
                 onEvent({ agent: "WebIntelAgent", status: `Failed: ${e.message}` });
                 return { webIntel: this.buildUnavailableWebIntel(ticker, e.message) } as Partial<AnalysisResult>;
-              })
+              }),
+            ComplianceAlertAgent.run({ ticker, companyName }, onEvent)
+              .then(compliance => ({ compliance } as Partial<AnalysisResult>))
+              .catch((e: any) => {
+                onEvent({ agent: "ComplianceAlertAgent", status: `Failed: ${e.message}` });
+                return { compliance: this.buildUnavailableCompliance(ticker, e.message) } as Partial<AnalysisResult>;
+              }),
           ]);
-          const partial = this.mergePartial(quantRes, webIntelRes);
+          const partial = this.mergePartial(this.mergePartial(quantRes, webIntelRes), complianceRes);
           onEvent({ agent: "QuantAgent", status: "Complete", partial: quantRes });
           if ((webIntelRes as any).webIntel) {
             onEvent({ agent: "WebIntelAgent", status: "Complete", partial: webIntelRes });
@@ -210,8 +219,11 @@ export class OrchestratorAgent {
       case "synthesize_verdict": {
         onEvent({ agent: "Orchestrator", status: "Calling synthesize_verdict → CIOAgent" });
         try {
-          const verdict = await CIOAgent.crossAnalyze(currentResult, currentResult);
-          const partial: Partial<AnalysisResult> = { crossAnalysis: verdict };
+          const [verdict, investmentSignal] = await Promise.all([
+            CIOAgent.crossAnalyze(currentResult, currentResult),
+            CIOAgent.generateInvestmentSignal(currentResult).catch(() => undefined)
+          ]);
+          const partial: Partial<AnalysisResult> = { crossAnalysis: verdict, ...(investmentSignal ? { investmentSignal } : {}) };
           onEvent({ agent: "CIOAgent", status: "Verdict complete", partial });
           return partial;
         } catch (e: any) { onEvent({ agent: "CIOAgent", status: `Failed: ${e.message}` }); return {}; }
@@ -316,6 +328,19 @@ export class OrchestratorAgent {
     return `Returned ${keys.join(", ") || "no structured fields"}`;
   }
 
+  private static buildUnavailableCompliance(ticker: string, reason: string) {
+    return {
+      as_of: new Date().toISOString(),
+      data_source: "brightdata_serp",
+      confidence: "low" as const,
+      refresh_interval: "每周一 09:00",
+      ticker,
+      alerts: [],
+      overall_risk: "low" as const,
+      data_gaps: [`ComplianceAlertAgent failed: ${reason || "unknown error"}`],
+    };
+  }
+
   private static buildUnavailableWebIntel(ticker: string, reason: string) {
     return {
       as_of: new Date().toISOString(),
@@ -369,7 +394,7 @@ export class OrchestratorAgent {
     const extractedTicker = rawTicker.split(/[\s\/\(（]/)[0].trim() || rawTicker.trim();
 
     if (extractedTicker) {
-      const parallelAgentNames = ["QuantAgent", ...(options.includes("competitors") ? ["PeerAgent"] : []), "ESGAgent", "StakeholderAgent", "WebIntelAgent"];
+      const parallelAgentNames = ["QuantAgent", ...(options.includes("competitors") ? ["PeerAgent"] : []), "ESGAgent", "StakeholderAgent", "WebIntelAgent", "ComplianceAlertAgent"];
       onEvent({ agent: "Orchestrator", status: `Ticker "${extractedTicker}" extracted from report — dispatching ${parallelAgentNames.join(" + ")} in parallel...` });
 
       const parallelTasks: Promise<Partial<AnalysisResult>>[] = [
@@ -416,6 +441,19 @@ export class OrchestratorAgent {
             onEvent({ agent: "WebIntelAgent", status: `Failed: ${e.message}` });
             return { webIntel: this.buildUnavailableWebIntel(extractedTicker, e.message) } as Partial<AnalysisResult>;
           }),
+        ComplianceAlertAgent.run({
+          ticker: extractedTicker,
+          companyName: result.company?.name || extractedTicker
+        }, onEvent)
+          .then(compliance => {
+            const partial = { compliance } as Partial<AnalysisResult>;
+            onEvent({ agent: "ComplianceAlertAgent", status: "Complete", partial });
+            return partial;
+          })
+          .catch((e: any) => {
+            onEvent({ agent: "ComplianceAlertAgent", status: `Failed: ${e.message}` });
+            return { compliance: this.buildUnavailableCompliance(extractedTicker, e.message) } as Partial<AnalysisResult>;
+          }),
       ];
 
       if (options.includes("competitors")) {
@@ -457,10 +495,14 @@ export class OrchestratorAgent {
         ...result,
         esg: (result as any).esg,
         stakeholder: (result as any).stakeholder,
-        webIntel: (result as any).webIntel
+        webIntel: (result as any).webIntel,
+        compliance: (result as any).compliance,
       };
-      const crossAnalysis = await CIOAgent.crossAnalyze(fundamentalResult, cioContext);
-      const partial: Partial<AnalysisResult> = { crossAnalysis };
+      const [crossAnalysis, investmentSignal] = await Promise.all([
+        CIOAgent.crossAnalyze(fundamentalResult, cioContext),
+        CIOAgent.generateInvestmentSignal(cioContext).catch(() => undefined)
+      ]);
+      const partial: Partial<AnalysisResult> = { crossAnalysis, ...(investmentSignal ? { investmentSignal } : {}) };
       result = this.mergePartial(result, partial);
       onEvent({ agent: "CIOAgent", status: "Cross-analysis complete", partial });
     } catch (e: any) {
@@ -474,6 +516,9 @@ export class OrchestratorAgent {
       await this.fillGapsWithKnowledge(gaps, result, { options }, onEvent);
     }
 
+    if ((result as any).investmentSignal && result.company?.ticker) {
+      saveAnalysisLog(result.company.ticker, (result as any).investmentSignal, result.company.name || "");
+    }
     onEvent({ agent: "Orchestrator", status: "Analysis Complete" });
     return result as AnalysisResult;
   }

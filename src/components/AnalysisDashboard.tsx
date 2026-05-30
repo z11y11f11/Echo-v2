@@ -5,13 +5,13 @@ import {
   AlertTriangle, CheckCircle2, FileText,
   BarChart3, RefreshCcw, DollarSign,
   ChevronDown, Maximize2, Minimize2, Activity,
-  PieChart, Sprout, Target, Download, Loader2, Users, Plus
+  PieChart, Sprout, Target, Download, Loader2, Users, Plus, ShieldAlert
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend
 } from 'recharts';
-import { AnalysisResult, StockData, HistoricalBar, ValuationSummary, CrossAnalysisResult } from '../types';
+import { AnalysisResult, StockData, HistoricalBar, ValuationSummary, CrossAnalysisResult, ComplianceOutput, InvestmentSignal } from '../types';
 import { ValuationModels } from './ValuationModels';
 import { PeerComparison } from './PeerComparison';
 import StakeholderModal from './StakeholderModal';
@@ -56,6 +56,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
   const competitors = data.competitors ?? [];
   const esg = data.esg;
   const webIntel = data.webIntel;
+  const compliance = data.compliance;
 
   const [stock, setStock] = useState<StockData | null>(null);
   const [history, setHistory] = useState<HistoricalBar[]>([]);
@@ -78,6 +79,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
     summary: true,
     insights: true,
     webIntel: true,
+    compliance: true,
     esg: true,
     stakeholder: true,
     competitors: false
@@ -164,7 +166,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
   };
 
   const setAllSections = (isOpen: boolean) => {
-    setSections({ metrics: isOpen, history: isOpen, valuation: isOpen, summary: isOpen, insights: isOpen, webIntel: isOpen, esg: isOpen, stakeholder: isOpen, competitors: isOpen });
+    setSections({ metrics: isOpen, history: isOpen, valuation: isOpen, summary: isOpen, insights: isOpen, webIntel: isOpen, compliance: isOpen, esg: isOpen, stakeholder: isOpen, competitors: isOpen });
   };
 
   const allExpanded = Object.values(sections).every(Boolean);
@@ -355,6 +357,9 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
           </div>
         </div>
 
+        {data.investmentSignal && (
+          <InvestmentSignalBadge signal={data.investmentSignal} />
+        )}
         <div className="flex flex-wrap items-center justify-start md:justify-end gap-2 md:max-w-[600px]">
           {stock && (
             <div className="flex flex-col items-end px-4 py-2 bg-[#0a0d14] rounded-xl border border-slate-800 shadow-inner shrink-0">
@@ -629,6 +634,21 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
               <WebIntelView webIntel={data.webIntel} />
             ) : (
               <p className="text-slate-500 text-sm italic">Live data unavailable</p>
+            )}
+          </CollapsibleSection>
+        </div>
+      )}
+
+      {/* ── Compliance & Risk Alerts ─────────────────────────────────────── */}
+      {(isLoading || compliance) && (
+        <div className="pdf-section">
+          <CollapsibleSection title="Compliance & Risk Alerts (Compliance Agent)" icon={<ShieldAlert className="w-5 h-5 text-rose-500" />} isOpen={sections.compliance} onToggle={() => toggleSection('compliance')}>
+            {isLoading && !compliance ? (
+              <SkeletonSection rows={5} />
+            ) : compliance ? (
+              <ComplianceView compliance={compliance} />
+            ) : (
+              <p className="text-slate-500 text-sm italic">Compliance data unavailable</p>
             )}
           </CollapsibleSection>
         </div>
@@ -1171,6 +1191,113 @@ function MetricsGrouped({ metrics }: { metrics: any[] }) {
               <MetricPanel title="Profitability & Balance" accent="border-indigo-900/40" metrics={profitability} />
             )}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InvestmentSignalBadge({ signal }: { signal: InvestmentSignal }) {
+  const palette = {
+    BUY:  { bg: 'bg-emerald-950/60', border: 'border-emerald-500/50', text: 'text-emerald-300', dot: 'bg-emerald-400', glow: 'shadow-[0_0_20px_rgba(52,211,153,0.25)]' },
+    SELL: { bg: 'bg-rose-950/60',    border: 'border-rose-500/50',    text: 'text-rose-300',    dot: 'bg-rose-400',    glow: 'shadow-[0_0_20px_rgba(251,113,133,0.25)]' },
+    HOLD: { bg: 'bg-amber-950/60',   border: 'border-amber-500/50',   text: 'text-amber-300',   dot: 'bg-amber-400',   glow: 'shadow-[0_0_20px_rgba(251,191,36,0.25)]' },
+  }[signal.verdict];
+
+  return (
+    <div className={`mt-3 md:mt-0 w-full md:w-auto rounded-2xl border p-4 ${palette.bg} ${palette.border} ${palette.glow}`}>
+      <div className="flex items-center gap-3 mb-3">
+        <div className={`w-3 h-3 rounded-full animate-pulse ${palette.dot}`} />
+        <span className={`text-3xl font-black tracking-widest font-mono ${palette.text}`}>{signal.verdict}</span>
+        <span className={`ml-auto px-2 py-0.5 rounded border text-[10px] font-bold uppercase tracking-widest ${palette.border} ${palette.text} opacity-70`}>
+          {signal.confidence} confidence
+        </span>
+      </div>
+      <ul className="space-y-1 mb-2">
+        {signal.key_reasons.map((r, i) => (
+          <li key={i} className="flex items-start gap-2 text-xs text-slate-300 leading-snug">
+            <span className={`mt-1 w-1.5 h-1.5 rounded-full shrink-0 ${palette.dot}`} />
+            {r}
+          </li>
+        ))}
+      </ul>
+      {signal.risk_warnings.length > 0 && (
+        <div className="border-t border-slate-700/50 pt-2 mt-2 space-y-1">
+          {signal.risk_warnings.map((w, i) => (
+            <div key={i} className="flex items-start gap-2 text-[11px] text-slate-500 leading-snug">
+              <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-amber-600" />
+              {w}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComplianceView({ compliance }: { compliance: ComplianceOutput }) {
+  const riskColors: Record<string, string> = {
+    high: "bg-rose-950/40 text-rose-400 border-rose-500/30",
+    medium: "bg-amber-950/40 text-amber-400 border-amber-500/30",
+    low: "bg-emerald-950/40 text-emerald-400 border-emerald-500/30",
+  };
+  const categoryLabel: Record<string, string> = {
+    regulatory: "Regulatory",
+    legal: "Legal",
+    esg_compliance: "ESG Compliance",
+    filing: "Filing",
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <InfoTile label="Ticker" value={compliance.ticker || "—"} />
+        <InfoTile label="Source" value={compliance.data_source || "—"} />
+        <InfoTile label="Confidence" value={compliance.confidence || "—"} />
+        <div className="p-4 bg-[#0a0d14]/80 border border-slate-800 rounded-xl min-w-0">
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Overall Risk</div>
+          <span className={`inline-block rounded border px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest ${riskColors[compliance.overall_risk] || riskColors.low}`}>
+            {compliance.overall_risk}
+          </span>
+        </div>
+      </div>
+
+      {compliance.alerts.length > 0 ? (
+        <div className="space-y-3">
+          {compliance.alerts.map((alert, i) => (
+            <div key={i} className="rounded-lg border border-slate-800 bg-slate-950/40 p-4">
+              <div className="flex items-start justify-between gap-3 mb-2">
+                <p className="text-sm text-slate-300 leading-relaxed">{alert.summary}</p>
+                <div className="flex flex-col items-end gap-1 shrink-0">
+                  <UrgencyBadge urgency={alert.urgency} />
+                  <span className="rounded border border-slate-700 bg-slate-900/40 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                    {categoryLabel[alert.category] || alert.category}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 mt-1">
+                {alert.source && (
+                  <a href={alert.source} target="_blank" rel="noreferrer" className="text-[10px] text-blue-500 hover:underline truncate max-w-[300px]">
+                    {alert.source}
+                  </a>
+                )}
+                {alert.date && <span className="text-[10px] text-slate-600 font-mono">{alert.date}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-slate-500 text-sm italic">No compliance alerts found.</p>
+      )}
+
+      {compliance.data_gaps?.length > 0 && (
+        <div className="p-4 rounded-xl border border-amber-900/40 bg-amber-950/10">
+          <div className="text-[10px] font-bold text-amber-400 uppercase tracking-widest mb-2">Data Gaps</div>
+          <ul className="space-y-1">
+            {compliance.data_gaps.map((gap, i) => (
+              <li key={i} className="text-xs text-slate-400">{gap}</li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

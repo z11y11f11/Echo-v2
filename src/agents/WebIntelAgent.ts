@@ -19,7 +19,7 @@ interface OrganicResult {
   displayed_link?: string;
 }
 
-const REFRESH_INTERVAL = "每天整点";
+const REFRESH_INTERVAL = "Hourly";
 
 export class WebIntelAgent {
   static async run(
@@ -32,13 +32,35 @@ export class WebIntelAgent {
 
     const [newsSignals, hiringTrend, regulatoryAlerts, competitiveSignals] = await Promise.all([
       this.safeSearch("news signals", dataGaps, async () => {
-        const results = await this.callSerpAPI(`${input.ticker} ${input.companyName} earnings news 2025`);
-        const news = this.toNewsSignals(results).slice(0, 8);
+        const [recent, product, analyst] = await Promise.all([
+          this.callSerpAPI(`${input.ticker} ${input.companyName} latest news site:reuters.com OR site:bloomberg.com OR site:wsj.com 2026`),
+          this.callSerpAPI(`${input.ticker} ${input.companyName} product launch partnership earnings 2026`),
+          this.callSerpAPI(`${input.ticker} analyst rating price target 2026`),
+        ]);
+        const seen = new Set<string>();
+        const merged = [...recent, ...product, ...analyst]
+          .map(r => ({ ...r, _title: (r.title || "").trim().toLowerCase() }))
+          .filter(r => {
+            if (!r._title || seen.has(r._title)) return false;
+            seen.add(r._title);
+            return true;
+          })
+          .sort((a, b) => {
+            if (!a.date && !b.date) return 0;
+            if (!a.date) return 1;
+            if (!b.date) return -1;
+            return new Date(b.date).getTime() - new Date(a.date).getTime();
+          })
+          .slice(0, 10);
+        const news = this.toNewsSignals(merged);
         return await this.classifyNewsSentiment(news);
       }),
       this.safeSearch("hiring trend", dataGaps, async () => {
-        const results = await this.callSerpAPI(`${input.companyName} hiring jobs 2025 site:linkedin.com OR site:indeed.com`);
-        return this.analyzeHiringTrend(results);
+        const [expandingResults, contractingResults] = await Promise.all([
+          this.callSerpAPI(`${input.companyName} hiring jobs open positions 2025 2026`),
+          this.callSerpAPI(`${input.companyName} layoff restructuring job cut 2025 2026`),
+        ]);
+        return this.analyzeHiringTrend(expandingResults, contractingResults);
       }),
       this.safeSearch("regulatory alerts", dataGaps, async () => {
         const results = await this.callSerpAPI(`${input.ticker} SEC regulation compliance filing 2025`);
@@ -185,23 +207,30 @@ export class WebIntelAgent {
     }));
   }
 
-  private static analyzeHiringTrend(results: OrganicResult[]): WebIntelOutput["hiring_trend"] {
-    const text = results.map(result => `${result.title || ""} ${result.snippet || result.description || ""}`).join(" ").toLowerCase();
-    if (!text.trim()) return { signal: "unknown", evidence: "No hiring results found." };
+  private static analyzeHiringTrend(
+    expandingResults: OrganicResult[],
+    contractingResults: OrganicResult[]
+  ): WebIntelOutput["hiring_trend"] {
+    const x = expandingResults.length;
+    const y = contractingResults.length;
 
-    const expandingSignals = ["hiring", "jobs", "open roles", "recruiting", "expansion", "growth"];
-    const contractingSignals = ["layoff", "layoffs", "hiring freeze", "job cuts", "restructuring", "headcount reduction"];
-
-    const hasContracting = contractingSignals.some(term => text.includes(term));
-    const hasExpanding = expandingSignals.some(term => text.includes(term));
-
-    if (hasContracting) {
-      return { signal: "contracting", evidence: "Search results include layoff, hiring freeze, restructuring, or job-cut language." };
+    if (x === 0 && y === 0) {
+      return { signal: "unknown", evidence: "No hiring results found." };
     }
-    if (hasExpanding) {
-      return { signal: "expanding", evidence: "Search results include hiring, recruiting, job postings, or expansion language." };
+
+    let signal: WebIntelOutput["hiring_trend"]["signal"];
+    if (x > y * 1.5) {
+      signal = "expanding";
+    } else if (y > x * 1.5) {
+      signal = "contracting";
+    } else {
+      signal = "stable";
     }
-    return { signal: "stable", evidence: "Search results show hiring presence without strong expansion or contraction language." };
+
+    return {
+      signal,
+      evidence: `Found ${x} hiring signals vs ${y} contraction signals from web search`,
+    };
   }
 
   private static toRegulatoryAlerts(results: OrganicResult[]): WebIntelOutput["regulatory_alerts"] {

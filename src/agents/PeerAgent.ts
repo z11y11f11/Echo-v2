@@ -1,5 +1,6 @@
 import { Type } from "@google/genai";
 import { runGenerativeAI } from "./LLMProvider";
+import { deduplicateBySymbol } from "../utils/entityNormalizer";
 
 export interface Competitor {
   name: string;
@@ -56,7 +57,9 @@ export class PeerAgent {
     `;
     
     const result = await runGenerativeAI(prompt, schemaProperties, ["competitors"]);
-    return result.competitors || [];
+    const raw: Competitor[] = result.competitors || [];
+    // Normalise and deduplicate by resolved Yahoo Finance symbol
+    return await deduplicateBySymbol(raw);
   }
 
   /**

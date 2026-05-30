@@ -1,12 +1,8 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Echo — Financial Intelligence Platform
 
-# FinAgent V2 (ForcV)
+**Autonomous multi-agent financial intelligence system — real-time web data, PDF reports, live market signals, and AI-powered synthesis in one dashboard.**
 
-**Autonomous multi-agent investment analysis — PDF reports, live market data, and AI-powered synthesis in one dashboard.**
-
-Built for the **Milan AI Week Hackathon 2026** · Powered by Gemini, OpenAI GPT-4o, and optionally Featherless open-source models.
+Built for the **Web Data UNLOCKED Hackathon 2026** · Powered by Bright Data · Gemini · OpenAI GPT-4o · Featherless
 
 ---
 

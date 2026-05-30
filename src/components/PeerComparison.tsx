@@ -3,6 +3,7 @@ import { Target, AlertCircle } from 'lucide-react';
 import { ValuationSummary } from '../types';
 import { resolveYahooTickersWithAI } from '../services/ai';
 import { normalizeYahooTicker } from '../utils/ticker';
+import { convertToUSD, formatWithCurrency, formatLargeWithCurrency, getRateDateLabel } from '../utils/currencyConverter';
 
 interface PeerComparisonProps {
   competitors: { name: string; ticker: string; rationale: string }[];
@@ -11,6 +12,7 @@ interface PeerComparisonProps {
 
 export function PeerComparison({ competitors, currentTicker }: PeerComparisonProps) {
   const [peerData, setPeerData] = useState<Record<string, ValuationSummary & { price?: number; name?: string; role?: string }>>({});
+  const [usdRates, setUsdRates] = useState<Record<string, number>>({});
   const [displayOrder, setDisplayOrder] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -100,6 +102,18 @@ export function PeerComparison({ competitors, currentTicker }: PeerComparisonPro
 
         if (!active) return;
 
+        // Fetch USD rates for all unique currencies found
+        const currencies = [...new Set(Object.values(newPeerData).map((d: any) => d.currency).filter(Boolean))];
+        const rateEntries = await Promise.all(
+          currencies.map(async (cur: string) => {
+            const usd = await convertToUSD(1, cur).catch(() => NaN);
+            return [cur, isNaN(usd) ? NaN : 1 / usd] as [string, number]; // usd per 1 local unit
+          })
+        );
+        const rates: Record<string, number> = {};
+        for (const [cur, rate] of rateEntries) if (!isNaN(rate)) rates[cur] = rate;
+        if (active) setUsdRates(rates);
+
         // Ensure current ticker is first in display order
         const reordered = [currentTicker, ...newDisplayOrder.filter(t => t !== currentTicker)];
         setDisplayOrder(reordered);
@@ -128,7 +142,7 @@ export function PeerComparison({ competitors, currentTicker }: PeerComparisonPro
     <div className="w-full">
       <div className="bg-[#080a0f]/80 rounded-xl border border-slate-800/80 overflow-hidden shadow-[0_0_20px_rgba(37,99,235,0.05)] backdrop-blur-md">
         <div className="px-6 py-3 border-b border-slate-800/80 bg-[#0a0d14] text-[11px] text-amber-400 font-bold tracking-wider">
-          数值为本地货币，未换算
+          Local currency · USD reference in parentheses · Rate date: {getRateDateLabel()}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left">
@@ -136,8 +150,8 @@ export function PeerComparison({ competitors, currentTicker }: PeerComparisonPro
               <tr>
                 <th className="px-6 py-4">Company</th>
                 <th className="px-6 py-4">Role</th>
-                <th className="px-6 py-4">Price Local</th>
-                <th className="px-6 py-4">Market Cap Local</th>
+                <th className="px-6 py-4">Price (Local / USD)</th>
+                <th className="px-6 py-4">Market Cap (Local / USD)</th>
                 <th className="px-6 py-4">Revenue Growth</th>
                 <th className="px-6 py-4">EBITDA Margin</th>
                 <th className="px-6 py-4">ROE</th>
@@ -178,8 +192,23 @@ export function PeerComparison({ competitors, currentTicker }: PeerComparisonPro
                            {d.role}
                          </span>
                        </td>
-                       <td className="px-6 py-4 font-mono text-slate-300">{formatCurrency(d.price, (d as any).currency)}</td>
-                       <td className="px-6 py-4 font-mono text-slate-300">{formatLargeNumber((d as any).marketCap, (d as any).currency)}</td>
+                       <td className="px-6 py-4 font-mono text-slate-300 text-xs">
+                         {(() => {
+                           const cur = (d as any).currency || '';
+                           const rate = usdRates[cur];
+                           const usd = rate && d.price ? d.price * rate : undefined;
+                           return formatWithCurrency(d.price!, cur, usd);
+                         })()}
+                       </td>
+                       <td className="px-6 py-4 font-mono text-slate-300 text-xs">
+                         {(() => {
+                           const cur = (d as any).currency || '';
+                           const mc = (d as any).marketCap;
+                           const rate = usdRates[cur];
+                           const usd = rate && mc ? mc * rate : undefined;
+                           return formatLargeWithCurrency(mc, cur, usd);
+                         })()}
+                       </td>
                        <td className="px-6 py-4 font-mono">
                          {d.revenueGrowth ? (
                            <span className={d.revenueGrowth > 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>

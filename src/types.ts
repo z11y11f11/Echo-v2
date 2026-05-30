@@ -25,6 +25,8 @@ export interface AnalysisResult {
   esg?: ESGOutput;
   stakeholder?: StakeholderOutput;
   webIntel?: WebIntelOutput;
+  compliance?: ComplianceOutput;
+  investmentSignal?: InvestmentSignal;
   competitors?: {
     name: string;
     ticker: string;
@@ -166,5 +168,32 @@ export interface WebIntelOutput {
     signal: string
     source: string
   }>
+  data_gaps: string[]
+}
+
+export interface InvestmentSignal {
+  verdict: 'BUY' | 'HOLD' | 'SELL'
+  confidence: 'high' | 'medium' | 'low'
+  key_reasons: string[]
+  risk_warnings: string[]
+  generated_at: string
+}
+
+export interface ComplianceAlert {
+  summary: string
+  source: string
+  urgency: 'high' | 'medium' | 'low'
+  date: string | null
+  category: 'regulatory' | 'legal' | 'esg_compliance' | 'filing'
+}
+
+export interface ComplianceOutput {
+  as_of: string
+  data_source: string
+  confidence: 'high' | 'medium' | 'low'
+  refresh_interval: string
+  ticker: string
+  alerts: ComplianceAlert[]
+  overall_risk: 'high' | 'medium' | 'low'
   data_gaps: string[]
 }
