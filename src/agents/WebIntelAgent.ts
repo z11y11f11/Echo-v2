@@ -37,12 +37,21 @@ export class WebIntelAgent {
           this.callSerpAPI(`${input.ticker} ${input.companyName} product launch partnership earnings 2026`),
           this.callSerpAPI(`${input.ticker} analyst rating price target 2026`),
         ]);
+        const tickerLower = input.ticker.toLowerCase();
+        const companyLower = input.companyName.toLowerCase().split(" ")[0]; // first word is enough
+        const IRRELEVANT = /predict|prophecy|psychic|astrology|horoscope|baba vanga|vanga|tarot|zodiac|fortune.tell/i;
+
         const seen = new Set<string>();
         const merged = [...recent, ...product, ...analyst]
           .map(r => ({ ...r, _title: (r.title || "").trim().toLowerCase() }))
           .filter(r => {
             if (!r._title || seen.has(r._title)) return false;
             seen.add(r._title);
+            // Drop obvious irrelevant content
+            const combined = `${r.title || ""} ${r.snippet || r.description || ""}`.toLowerCase();
+            if (IRRELEVANT.test(combined)) return false;
+            // Must mention ticker OR first word of company name
+            if (!combined.includes(tickerLower) && !combined.includes(companyLower)) return false;
             return true;
           })
           .sort((a, b) => {

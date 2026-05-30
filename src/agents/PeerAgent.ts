@@ -56,8 +56,44 @@ export class PeerAgent {
       ${contextPayload.substring(0, 10000)}
     `;
     
+    let raw: Competitor[] = [];
+
+    // First attempt
     const result = await runGenerativeAI(prompt, schemaProperties, ["competitors"]);
-    const raw: Competitor[] = result.competitors || [];
+    raw = result.competitors || [];
+
+    // Retry once if fewer than 3 peers returned
+    if (raw.length < 3) {
+      console.warn(`PeerAgent: only ${raw.length} peers on first attempt — retrying`);
+      try {
+        const retry = await runGenerativeAI(
+          prompt + "\n\nIMPORTANT: You MUST return at least 3 direct competitors with valid Yahoo Finance tickers. Do not return fewer.",
+          schemaProperties,
+          ["competitors"]
+        );
+        const retryPeers: Competitor[] = retry.competitors || [];
+        // Merge, dedup by ticker
+        const seen = new Set(raw.map(c => c.ticker.toUpperCase()));
+        for (const c of retryPeers) {
+          if (!seen.has(c.ticker.toUpperCase())) {
+            raw.push(c);
+            seen.add(c.ticker.toUpperCase());
+          }
+        }
+      } catch (e) {
+        console.warn("PeerAgent: retry failed", e);
+      }
+    }
+
+    // Hard fallback: if still < 3, pad with sector placeholders so dashboard is never empty
+    if (raw.length === 0) {
+      raw = [
+        { name: "Sector Peer A", ticker: "N/A", rationale: "Peer data unavailable — retries exhausted" },
+        { name: "Sector Peer B", ticker: "N/A", rationale: "Peer data unavailable — retries exhausted" },
+        { name: "Sector Peer C", ticker: "N/A", rationale: "Peer data unavailable — retries exhausted" },
+      ];
+    }
+
     // Normalise and deduplicate by resolved Yahoo Finance symbol
     return await deduplicateBySymbol(raw);
   }

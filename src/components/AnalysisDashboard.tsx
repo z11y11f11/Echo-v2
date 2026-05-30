@@ -357,10 +357,8 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
           </div>
         </div>
 
-        {data.investmentSignal && (
-          <InvestmentSignalBadge signal={data.investmentSignal} />
-        )}
         <div className="flex flex-wrap items-center justify-start md:justify-end gap-2 md:max-w-[600px]">
+          <InvestmentSignalBadge signal={data.investmentSignal ?? null} />
           {stock && (
             <div className="flex flex-col items-end px-4 py-2 bg-[#0a0d14] rounded-xl border border-slate-800 shadow-inner shrink-0">
               <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Market Price</span>
@@ -375,7 +373,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
                   {Math.abs(stock.regularMarketChangePercent || 0).toFixed(2)}%
                 </span>
               </div>
-              <span className="mt-1 text-[10px] text-amber-400 font-bold">数值为本地货币，未换算</span>
+              <span className="mt-1 text-[10px] text-amber-400 font-bold">Values in local currency · not converted</span>
             </div>
           )}
           <button
@@ -534,7 +532,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
       <div className="pdf-section">
         <CollapsibleSection title="Key Performance Indicators" icon={<Activity className="w-5 h-5 text-blue-500" />} isOpen={sections.metrics} onToggle={() => toggleSection('metrics')}>
           <div className="mb-4 rounded-lg border border-amber-900/40 bg-amber-950/10 px-3 py-2 text-[11px] font-bold text-amber-400">
-            数值为本地货币，未换算
+            Values in local currency · not converted
           </div>
           {isLoading && !metrics.length ? (
             <div className="space-y-4">
@@ -1197,7 +1195,17 @@ function MetricsGrouped({ metrics }: { metrics: any[] }) {
   );
 }
 
-function InvestmentSignalBadge({ signal }: { signal: InvestmentSignal }) {
+function InvestmentSignalBadge({ signal }: { signal: InvestmentSignal | null }) {
+  if (!signal) {
+    return (
+      <div className="flex flex-col items-center justify-center px-4 py-2 bg-[#0a0d14] rounded-xl border border-slate-700 shadow-inner shrink-0 min-w-[110px]">
+        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">Signal</span>
+        <span className="text-lg font-black tracking-widest font-mono text-slate-500">PENDING</span>
+        <span className="text-[10px] text-slate-600 mt-0.5">Awaiting CIO</span>
+      </div>
+    );
+  }
+
   const palette = {
     BUY:  { bg: 'bg-emerald-950/60', border: 'border-emerald-500/50', text: 'text-emerald-300', dot: 'bg-emerald-400', glow: 'shadow-[0_0_20px_rgba(52,211,153,0.25)]' },
     SELL: { bg: 'bg-rose-950/60',    border: 'border-rose-500/50',    text: 'text-rose-300',    dot: 'bg-rose-400',    glow: 'shadow-[0_0_20px_rgba(251,113,133,0.25)]' },
@@ -1205,27 +1213,27 @@ function InvestmentSignalBadge({ signal }: { signal: InvestmentSignal }) {
   }[signal.verdict];
 
   return (
-    <div className={`mt-3 md:mt-0 w-full md:w-auto rounded-2xl border p-4 ${palette.bg} ${palette.border} ${palette.glow}`}>
-      <div className="flex items-center gap-3 mb-3">
-        <div className={`w-3 h-3 rounded-full animate-pulse ${palette.dot}`} />
-        <span className={`text-3xl font-black tracking-widest font-mono ${palette.text}`}>{signal.verdict}</span>
-        <span className={`ml-auto px-2 py-0.5 rounded border text-[10px] font-bold uppercase tracking-widest ${palette.border} ${palette.text} opacity-70`}>
-          {signal.confidence} confidence
+    <div className={`rounded-xl border p-3 shrink-0 max-w-[260px] ${palette.bg} ${palette.border} ${palette.glow}`}>
+      <div className="flex items-center gap-2 mb-2">
+        <div className={`w-2.5 h-2.5 rounded-full animate-pulse ${palette.dot}`} />
+        <span className={`text-2xl font-black tracking-widest font-mono ${palette.text}`}>{signal.verdict}</span>
+        <span className={`ml-auto px-1.5 py-0.5 rounded border text-[10px] font-bold uppercase tracking-widest ${palette.border} ${palette.text} opacity-70`}>
+          {signal.confidence}
         </span>
       </div>
-      <ul className="space-y-1 mb-2">
+      <ul className="space-y-0.5 mb-1.5">
         {signal.key_reasons.map((r, i) => (
-          <li key={i} className="flex items-start gap-2 text-xs text-slate-300 leading-snug">
-            <span className={`mt-1 w-1.5 h-1.5 rounded-full shrink-0 ${palette.dot}`} />
+          <li key={i} className="flex items-start gap-1.5 text-[11px] text-slate-300 leading-snug">
+            <span className={`mt-1 w-1 h-1 rounded-full shrink-0 ${palette.dot}`} />
             {r}
           </li>
         ))}
       </ul>
       {signal.risk_warnings.length > 0 && (
-        <div className="border-t border-slate-700/50 pt-2 mt-2 space-y-1">
+        <div className="border-t border-slate-700/50 pt-1.5 mt-1.5 space-y-0.5">
           {signal.risk_warnings.map((w, i) => (
-            <div key={i} className="flex items-start gap-2 text-[11px] text-slate-500 leading-snug">
-              <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-amber-600" />
+            <div key={i} className="flex items-start gap-1.5 text-[10px] text-slate-500 leading-snug">
+              <AlertTriangle className="w-2.5 h-2.5 shrink-0 mt-0.5 text-amber-600" />
               {w}
             </div>
           ))}

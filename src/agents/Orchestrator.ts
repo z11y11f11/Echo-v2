@@ -18,6 +18,27 @@ export type AgentEvent = {
   partial?: Partial<AnalysisResult>;
 };
 
+const AGENT_TIMEOUT_MS = 30_000; // 30 seconds per agent
+
+/** Wraps a promise with a hard timeout. Resolves to fallback value on timeout. */
+function withTimeout<T>(
+  promise: Promise<T>,
+  fallback: T,
+  label: string,
+  onTimeout?: (label: string) => void
+): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = setTimeout(() => {
+      onTimeout?.(label);
+      resolve(fallback);
+    }, AGENT_TIMEOUT_MS);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); resolve(fallback); console.warn(`[Orchestrator] ${label} rejected:`, e?.message); }
+    );
+  });
+}
+
 export class OrchestratorAgent {
   /**
    * The single entry point for a truly autonomous multi-agent system.
@@ -163,25 +184,31 @@ export class OrchestratorAgent {
         try {
           const companyName = currentResult.company?.name || input.userRequest || ticker;
           const [quantRes, webIntelRes, complianceRes] = await Promise.all([
-            QuantAgent.runAutonomousAnalysis(
-              ticker, toolCall.arguments.options || input.options,
-              (s) => onEvent({ agent: "QuantAgent", status: s.replace("QuantAgent: ", "") })
-            ).catch((e: any) => {
-              onEvent({ agent: "QuantAgent", status: `Failed: ${e.message}` });
-              return {} as Partial<AnalysisResult>;
-            }),
-            WebIntelAgent.run({ ticker, companyName }, onEvent)
-              .then(webIntel => ({ webIntel } as Partial<AnalysisResult>))
-              .catch((e: any) => {
-                onEvent({ agent: "WebIntelAgent", status: `Failed: ${e.message}` });
-                return { webIntel: this.buildUnavailableWebIntel(ticker, e.message) } as Partial<AnalysisResult>;
-              }),
-            ComplianceAlertAgent.run({ ticker, companyName }, onEvent)
-              .then(compliance => ({ compliance } as Partial<AnalysisResult>))
-              .catch((e: any) => {
-                onEvent({ agent: "ComplianceAlertAgent", status: `Failed: ${e.message}` });
-                return { compliance: this.buildUnavailableCompliance(ticker, e.message) } as Partial<AnalysisResult>;
-              }),
+            withTimeout(
+              QuantAgent.runAutonomousAnalysis(
+                ticker, toolCall.arguments.options || input.options,
+                (s) => onEvent({ agent: "QuantAgent", status: s.replace("QuantAgent: ", "") })
+              ),
+              {} as Partial<AnalysisResult>,
+              "QuantAgent",
+              (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+            ),
+            withTimeout(
+              WebIntelAgent.run({ ticker, companyName }, onEvent)
+                .then(webIntel => ({ webIntel } as Partial<AnalysisResult>))
+                .catch(() => ({ webIntel: this.buildUnavailableWebIntel(ticker, "request failed") } as Partial<AnalysisResult>)),
+              { webIntel: this.buildUnavailableWebIntel(ticker, "timed out") } as Partial<AnalysisResult>,
+              "WebIntelAgent",
+              (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+            ),
+            withTimeout(
+              ComplianceAlertAgent.run({ ticker, companyName }, onEvent)
+                .then(compliance => ({ compliance } as Partial<AnalysisResult>))
+                .catch(() => ({ compliance: this.buildUnavailableCompliance(ticker, "request failed") } as Partial<AnalysisResult>)),
+              { compliance: this.buildUnavailableCompliance(ticker, "timed out") } as Partial<AnalysisResult>,
+              "ComplianceAlertAgent",
+              (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+            ),
           ]);
           const partial = this.mergePartial(this.mergePartial(quantRes, webIntelRes), complianceRes);
           onEvent({ agent: "QuantAgent", status: "Complete", partial: quantRes });
@@ -333,7 +360,7 @@ export class OrchestratorAgent {
       as_of: new Date().toISOString(),
       data_source: "brightdata_serp",
       confidence: "low" as const,
-      refresh_interval: "每周一 09:00",
+      refresh_interval: "Every Monday 09:00",
       ticker,
       alerts: [],
       overall_risk: "low" as const,
@@ -346,7 +373,7 @@ export class OrchestratorAgent {
       as_of: new Date().toISOString(),
       data_source: "brightdata_serp",
       confidence: "low" as const,
-      refresh_interval: "每天整点",
+      refresh_interval: "Hourly",
       ticker,
       news_signals: [],
       hiring_trend: {
@@ -397,78 +424,83 @@ export class OrchestratorAgent {
       const parallelAgentNames = ["QuantAgent", ...(options.includes("competitors") ? ["PeerAgent"] : []), "ESGAgent", "StakeholderAgent", "WebIntelAgent", "ComplianceAlertAgent"];
       onEvent({ agent: "Orchestrator", status: `Ticker "${extractedTicker}" extracted from report — dispatching ${parallelAgentNames.join(" + ")} in parallel...` });
 
+      const companyNameForParallel = result.company?.name || extractedTicker;
       const parallelTasks: Promise<Partial<AnalysisResult>>[] = [
-        QuantAgent.runAutonomousAnalysis(extractedTicker, options,
-          (s) => onEvent({ agent: "QuantAgent", status: s.replace("QuantAgent: ", "") })
-        ).catch((e: any) => {
-          onEvent({ agent: "QuantAgent", status: `Failed: ${e.message}` });
-          return {} as Partial<AnalysisResult>;
-        }),
-        ESGAgent.run({
-          ticker: extractedTicker,
-          industry: result.company?.name || "unknown",
-          pdfText: [fundamentalResult.summary, result.esgSummary].filter(Boolean).join("\n") || null
-        }, onEvent)
-          .then(esg => {
-            const partial = { esg } as Partial<AnalysisResult>;
-            onEvent({ agent: "ESGAgent", status: "Complete", partial });
-            return partial;
-          })
-          .catch((e: any) => {
-            onEvent({ agent: "ESGAgent", status: `Failed: ${e.message}` });
-            return {} as Partial<AnalysisResult>;
-          }),
-        StakeholderAgent.runAutonomousAnalysis({ ticker: extractedTicker }, onEvent)
-          .then(stakeholder => {
-            const partial = { stakeholder } as Partial<AnalysisResult>;
-            onEvent({ agent: "StakeholderAgent", status: "Complete", partial });
-            return partial;
-          })
-          .catch((e: any) => {
-            onEvent({ agent: "StakeholderAgent", status: `Failed: ${e.message}` });
-            return {} as Partial<AnalysisResult>;
-          }),
-        WebIntelAgent.run({
-          ticker: extractedTicker,
-          companyName: result.company?.name || extractedTicker
-        }, onEvent)
-          .then(webIntel => {
-            const partial = { webIntel } as Partial<AnalysisResult>;
-            onEvent({ agent: "WebIntelAgent", status: "Complete", partial });
-            return partial;
-          })
-          .catch((e: any) => {
-            onEvent({ agent: "WebIntelAgent", status: `Failed: ${e.message}` });
-            return { webIntel: this.buildUnavailableWebIntel(extractedTicker, e.message) } as Partial<AnalysisResult>;
-          }),
-        ComplianceAlertAgent.run({
-          ticker: extractedTicker,
-          companyName: result.company?.name || extractedTicker
-        }, onEvent)
-          .then(compliance => {
-            const partial = { compliance } as Partial<AnalysisResult>;
-            onEvent({ agent: "ComplianceAlertAgent", status: "Complete", partial });
-            return partial;
-          })
-          .catch((e: any) => {
-            onEvent({ agent: "ComplianceAlertAgent", status: `Failed: ${e.message}` });
-            return { compliance: this.buildUnavailableCompliance(extractedTicker, e.message) } as Partial<AnalysisResult>;
-          }),
+        withTimeout(
+          QuantAgent.runAutonomousAnalysis(extractedTicker, options,
+            (s) => onEvent({ agent: "QuantAgent", status: s.replace("QuantAgent: ", "") })
+          ),
+          {} as Partial<AnalysisResult>,
+          "QuantAgent",
+          (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+        ),
+        withTimeout(
+          ESGAgent.run({
+            ticker: extractedTicker,
+            industry: companyNameForParallel,
+            pdfText: [fundamentalResult.summary, result.esgSummary].filter(Boolean).join("\n") || null
+          }, onEvent)
+            .then(esg => {
+              const partial = { esg } as Partial<AnalysisResult>;
+              onEvent({ agent: "ESGAgent", status: "Complete", partial });
+              return partial;
+            }),
+          {} as Partial<AnalysisResult>,
+          "ESGAgent",
+          (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+        ),
+        withTimeout(
+          StakeholderAgent.runAutonomousAnalysis({ ticker: extractedTicker }, onEvent)
+            .then(stakeholder => {
+              const partial = { stakeholder } as Partial<AnalysisResult>;
+              onEvent({ agent: "StakeholderAgent", status: "Complete", partial });
+              return partial;
+            }),
+          {} as Partial<AnalysisResult>,
+          "StakeholderAgent",
+          (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+        ),
+        withTimeout(
+          WebIntelAgent.run({ ticker: extractedTicker, companyName: companyNameForParallel }, onEvent)
+            .then(webIntel => {
+              const partial = { webIntel } as Partial<AnalysisResult>;
+              onEvent({ agent: "WebIntelAgent", status: "Complete", partial });
+              return partial;
+            })
+            .catch(() => ({ webIntel: this.buildUnavailableWebIntel(extractedTicker, "request failed") } as Partial<AnalysisResult>)),
+          { webIntel: this.buildUnavailableWebIntel(extractedTicker, "timed out") } as Partial<AnalysisResult>,
+          "WebIntelAgent",
+          (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+        ),
+        withTimeout(
+          ComplianceAlertAgent.run({ ticker: extractedTicker, companyName: companyNameForParallel }, onEvent)
+            .then(compliance => {
+              const partial = { compliance } as Partial<AnalysisResult>;
+              onEvent({ agent: "ComplianceAlertAgent", status: "Complete", partial });
+              return partial;
+            })
+            .catch(() => ({ compliance: this.buildUnavailableCompliance(extractedTicker, "request failed") } as Partial<AnalysisResult>)),
+          { compliance: this.buildUnavailableCompliance(extractedTicker, "timed out") } as Partial<AnalysisResult>,
+          "ComplianceAlertAgent",
+          (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+        ),
       ];
 
       if (options.includes("competitors")) {
         const peerCtx = result.summary || result.company?.name || extractedTicker;
         parallelTasks.push(
-          PeerAgent.identifyPeers(peerCtx)
-            .then(peers => {
-              const partial: Partial<AnalysisResult> = { competitors: peers };
-              onEvent({ agent: "PeerAgent", status: `Found ${peers.length} peers`, partial });
-              return partial;
-            })
-            .catch((e: any) => {
-              onEvent({ agent: "PeerAgent", status: `Failed: ${e.message}` });
-              return {} as Partial<AnalysisResult>;
-            })
+          withTimeout(
+            PeerAgent.identifyPeers(peerCtx)
+              .then(peers => {
+                const partial: Partial<AnalysisResult> = { competitors: peers };
+                onEvent({ agent: "PeerAgent", status: `Found ${peers.length} peers`, partial });
+                return partial;
+              })
+              .catch(() => ({} as Partial<AnalysisResult>)),
+            {} as Partial<AnalysisResult>,
+            "PeerAgent",
+            (lbl) => onEvent({ agent: lbl, status: "Timed out after 30s — skipped" })
+          )
         );
       }
 

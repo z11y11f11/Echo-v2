@@ -1,10 +1,10 @@
 export const REFRESH_SCHEDULE = {
-  market_data: '每10分钟（交易时段内）',
-  news: '每天整点',
-  filings: '每天 06:00',
-  hiring: '每周一 09:00',
-  regulatory: '每周一 09:00',
-  esg: '每季度首个工作日 09:00',
+  market_data: 'Every 10 minutes (trading hours)',
+  news: 'Hourly',
+  filings: 'Daily 06:00',
+  hiring: 'Every Monday 09:00',
+  regulatory: 'Every Monday 09:00',
+  esg: 'First business day of each quarter',
 } as const
 
 export type RefreshType = keyof typeof REFRESH_SCHEDULE
@@ -30,7 +30,7 @@ export class Scheduler {
     return REFRESH_SCHEDULE[type]
   }
 
-  // 预留接口，后续 Bright Data 接入后实现
+  // Reserved interfaces — to be implemented after Bright Data integration
   // async triggerRefresh(ticker: string, type: RefreshType): Promise<void>
   // async startMonitoring(): Promise<void>
   // async stopMonitoring(): Promise<void>
