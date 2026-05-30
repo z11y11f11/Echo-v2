@@ -439,9 +439,12 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
         <StakeholderModal
           ticker={resolvedTicker || company.ticker}
           onClose={() => setIsStakeholderModalOpen(false)}
-          onComplete={(output) => {
-            setStakeholderOverride(output);
-            setSections(prev => ({ ...prev, stakeholder: true }));
+          /* Browse mode — entity clicks open a new browser tab to that ticker's Yahoo page,
+             since AnalysisDashboard is not aware of WatchlistDashboard's tab system. */
+          onSelectEntity={(entityTicker) => {
+            if (entityTicker && entityTicker !== 'N/A') {
+              window.open(`https://finance.yahoo.com/quote/${encodeURIComponent(entityTicker)}`, '_blank');
+            }
           }}
         />
       )}

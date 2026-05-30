@@ -606,16 +606,20 @@ export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { 
         )}
       </AnimatePresence>
 
-      {/* StakeholderModal — on-demand, doesn't navigate away */}
+      {/* StakeholderModal — browse view; click an entity to open it as monitor tab */}
       {stakeholderTicker && (
         <StakeholderModal
           ticker={stakeholderTicker}
           onClose={() => setStakeholderTicker(null)}
-          onComplete={(output) => {
-            setAnalysisData(prev => ({
-              ...prev,
-              [stakeholderTicker]: { ...(prev[stakeholderTicker] ?? {}), stakeholder: output }
-            }));
+          onSelectEntity={(entityTicker) => {
+            const tk = entityTicker.trim().toUpperCase();
+            if (!tk) return;
+            // Add to watchlist if not present, then open as tab
+            if (!watchlist.some(w => w.ticker === tk)) {
+              setWatchlist(prev => [...prev, { ticker: tk, addedAt: new Date().toISOString() }]);
+              fetchTickerData(tk);
+            }
+            openStockTab(tk);
             setStakeholderTicker(null);
           }}
         />
