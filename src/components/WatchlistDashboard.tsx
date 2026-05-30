@@ -19,11 +19,35 @@ import {
   Plus, X, RefreshCw, TrendingUp, TrendingDown,
   AlertTriangle, CheckCircle2, Clock,
   ExternalLink, Loader2, ShieldAlert, Globe,
-  History, Zap, RefreshCcw
+  History, Zap, RefreshCcw, Bot, BarChart3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CIOAgent } from '../agents/CIOAgent';
 import { saveAnalysisLog } from '../utils/db';
+import { runMasterAnalysis } from '../services/ai';
+import type { AgentEvent } from '../services/ai';
+import type { AnalysisResult } from '../types';
+import AnalysisDashboard from './AnalysisDashboard';
+import StakeholderModal from './StakeholderModal';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function mergePartial(acc: Partial<AnalysisResult>, incoming: Partial<AnalysisResult>): Partial<AnalysisResult> {
+  const merged = { ...acc, ...incoming };
+  if (acc.metrics && incoming.metrics) {
+    const seen = new Set(acc.metrics.map(m => m.label));
+    merged.metrics = [...acc.metrics, ...incoming.metrics.filter(m => !seen.has(m.label))];
+  }
+  if (acc.highlights && incoming.highlights) {
+    const seen = new Set(acc.highlights);
+    merged.highlights = [...acc.highlights, ...incoming.highlights.filter(h => !seen.has(h))];
+  }
+  if (acc.risks && incoming.risks) {
+    const seen = new Set(acc.risks);
+    merged.risks = [...acc.risks, ...incoming.risks.filter(r => !seen.has(r))];
+  }
+  return merged;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -169,7 +193,8 @@ const Sk = ({ h = 'h-4', w = 'w-full' }: { h?: string; w?: string }) => (
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigateToAnalysis: () => void }) {
+// onNavigateToAnalysis kept as no-op prop for App.tsx compatibility
+export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { onNavigateToAnalysis: () => void }) {
   const [watchlist, setWatchlist]     = useState<WatchlistItem[]>(loadWatchlist);
   const [openTabs, setOpenTabs]       = useState<string[]>([]);
   const [activeView, setActiveView]   = useState<'portfolio' | string>('portfolio');
@@ -185,6 +210,15 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
   const [addError, setAddError] = useState('');
   const [refreshAllActive, setRefreshAllActive] = useState(false);
   const [refreshAllCurrent, setRefreshAllCurrent] = useState<string>('');
+
+  // Inline full analysis per ticker
+  const [analysisData,    setAnalysisData]    = useState<Record<string, Partial<AnalysisResult>>>({});
+  const [analysisRunning, setAnalysisRunning] = useState<Record<string, boolean>>({});
+  const [analysisAgent,   setAnalysisAgent]   = useState<Record<string, string>>({});
+
+  // StakeholderModal
+  const [stakeholderTicker, setStakeholderTicker] = useState<string | null>(null);
+
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Persist watchlist
@@ -252,6 +286,32 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
       setRefreshStatus(prev => ({ ...prev, [ticker]: 'error' }));
       // Reset error status after 4 seconds so user can retry
       setTimeout(() => setRefreshStatus(prev => ({ ...prev, [ticker]: 'idle' })), 4000);
+    }
+  }, []);
+
+  // ── Inline full analysis ────────────────────────────────────────────────────
+
+  const runInlineAnalysis = useCallback(async (ticker: string) => {
+    setAnalysisRunning(prev => ({ ...prev, [ticker]: true }));
+    setAnalysisData(prev => { const n = {...prev}; delete n[ticker]; return n; }); // clear stale
+    let partial: Partial<AnalysisResult> = {};
+    try {
+      const final = await runMasterAnalysis(
+        { ticker, options: ['highlights', 'risks', 'esg', 'competitors'] },
+        (evt: AgentEvent) => {
+          setAnalysisAgent(prev => ({ ...prev, [ticker]: `${evt.agent}: ${evt.status}` }));
+          if (evt.partial) {
+            partial = mergePartial(partial, evt.partial);
+            setAnalysisData(prev => ({ ...prev, [ticker]: partial }));
+          }
+        }
+      );
+      setAnalysisData(prev => ({ ...prev, [ticker]: final }));
+    } catch (e: any) {
+      console.error(`[InlineAnalysis] ${ticker}:`, e);
+    } finally {
+      setAnalysisRunning(prev => ({ ...prev, [ticker]: false }));
+      setAnalysisAgent(prev => { const n = {...prev}; delete n[ticker]; return n; });
     }
   }, []);
 
@@ -425,6 +485,21 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
         })}
       </div>
 
+      {/* StakeholderModal — on-demand, doesn't navigate away */}
+      {stakeholderTicker && (
+        <StakeholderModal
+          ticker={stakeholderTicker}
+          onClose={() => setStakeholderTicker(null)}
+          onComplete={(output) => {
+            setAnalysisData(prev => ({
+              ...prev,
+              [stakeholderTicker]: { ...(prev[stakeholderTicker] ?? {}), stakeholder: output }
+            }));
+            setStakeholderTicker(null);
+          }}
+        />
+      )}
+
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         <AnimatePresence mode="sync">
@@ -453,8 +528,12 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
                 liveEntry={liveData[activeView]}
                 loading={loadingTickers.has(activeView)}
                 refreshStatus={refreshStatus[activeView] ?? 'idle'}
-                onNavigateToAnalysis={onNavigateToAnalysis}
+                analysisData={analysisData[activeView]}
+                analysisLoading={analysisRunning[activeView] ?? false}
+                analysisAgentStatus={analysisAgent[activeView] ?? ''}
                 onRefresh={() => refreshTicker(activeView)}
+                onRunAnalysis={() => runInlineAnalysis(activeView)}
+                onOpenStakeholder={() => setStakeholderTicker(activeView)}
               />
             </motion.div>
           )}
@@ -672,11 +751,15 @@ interface IndividualStockViewProps {
   liveEntry?: LiveEntry;
   loading: boolean;
   refreshStatus: RefreshStatus;
-  onNavigateToAnalysis: () => void;
+  analysisData?: Partial<AnalysisResult>;
+  analysisLoading: boolean;
+  analysisAgentStatus: string;
   onRefresh: () => void;
+  onRunAnalysis: () => void;
+  onOpenStakeholder: () => void;
 }
 
-function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading, refreshStatus, onNavigateToAnalysis, onRefresh }: IndividualStockViewProps) {
+function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading, refreshStatus, analysisData, analysisLoading, analysisAgentStatus, onRefresh, onRunAnalysis, onOpenStakeholder }: IndividualStockViewProps) {
   const latest     = signalHistory[0];
   const newsSignals = liveEntry?.webIntel?.news_signals ?? [];
   const alerts      = liveEntry?.compliance?.alerts ?? [];
@@ -684,6 +767,11 @@ function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading,
   const change      = fmtChange(quote?.regularMarketChangePercent);
   const isRefreshing = refreshStatus === 'refreshing';
   const isError      = refreshStatus === 'error';
+  const hasReport   = !!analysisData?.company;
+
+  // Auto-show full report tab when analysis completes
+  const [view, setView] = useState<'monitor' | 'report'>('monitor');
+  useEffect(() => { if (hasReport && !analysisLoading) setView('report'); }, [hasReport, analysisLoading]);
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-5">
@@ -899,16 +987,64 @@ function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading,
         )}
       </div>
 
-      {/* Action buttons */}
-      <div className="flex flex-wrap items-center gap-3 pb-4">
-        <button onClick={onNavigateToAnalysis} className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-bold transition-all shadow-[0_0_15px_rgba(37,99,235,0.25)]">
-          <Zap className="w-4 h-4" /> Run Full Analysis
+      {/* Action buttons + view toggle */}
+      <div className="flex flex-wrap items-center gap-3 pb-2">
+        <button
+          onClick={onRunAnalysis}
+          disabled={analysisLoading}
+          className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-sm font-bold transition-all shadow-[0_0_15px_rgba(37,99,235,0.25)]"
+        >
+          {analysisLoading
+            ? <><Loader2 className="w-4 h-4 animate-spin" /> Analysing…</>
+            : <><Zap className="w-4 h-4" /> {hasReport ? 'Re-run Analysis' : 'Run Full Analysis'}</>
+          }
         </button>
-        <button onClick={onNavigateToAnalysis} className="flex items-center gap-2 px-5 py-2.5 border border-slate-700 bg-[#0a0d14] text-slate-300 hover:text-white hover:border-slate-600 rounded-xl text-sm font-bold transition-colors">
-          <ExternalLink className="w-4 h-4" /> View Stakeholder & ESG
+        <button
+          onClick={onOpenStakeholder}
+          className="flex items-center gap-2 px-5 py-2.5 border border-slate-700 bg-[#0a0d14] text-slate-300 hover:text-white hover:border-slate-600 rounded-xl text-sm font-bold transition-colors"
+        >
+          <ExternalLink className="w-4 h-4" /> Stakeholder & ESG
         </button>
-        <span className="text-[10px] text-slate-600 ml-auto">Deep analysis available in Market Analysis tab</span>
+        {hasReport && (
+          <div className="ml-auto flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg p-0.5">
+            <button
+              onClick={() => setView('monitor')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${view === 'monitor' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+            >
+              <BarChart3 className="w-3 h-3" /> Monitor
+            </button>
+            <button
+              onClick={() => setView('report')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${view === 'report' ? 'bg-blue-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+            >
+              <ExternalLink className="w-3 h-3" /> Full Report
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Agent status while analysing */}
+      {analysisLoading && analysisAgentStatus && (
+        <div className="flex items-center gap-3 bg-slate-900/80 border border-blue-500/20 rounded-xl px-4 py-3">
+          <Bot className="w-4 h-4 text-blue-400 animate-pulse shrink-0" />
+          <div className="min-w-0">
+            <div className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Multi-Agent Analysis Running</div>
+            <div className="text-xs text-slate-300 mt-0.5 truncate">{analysisAgentStatus}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Full report inline */}
+      {(hasReport || analysisLoading) && view === 'report' && (
+        <div className="border border-slate-800 rounded-2xl overflow-hidden">
+          <AnalysisDashboard
+            data={analysisData ?? {}}
+            isLoading={analysisLoading}
+            onReset={onRunAnalysis}
+            hideToolbar={false}
+          />
+        </div>
+      )}
     </div>
   );
 }
