@@ -397,23 +397,37 @@ export default function WatchlistDashboard({ onNavigateToAnalysis }: { onNavigat
             activeView === 'portfolio' ? 'bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20' : 'text-slate-500 hover:text-slate-300'
           }`}
         >Portfolio</button>
-        {openTabs.map(ticker => (
-          <button
-            key={ticker}
-            onClick={() => setActiveView(ticker)}
-            className={`shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-colors group ${
-              activeView === ticker ? 'bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/20' : 'text-slate-500 hover:text-slate-300'
-            }`}
-          >
-            <span className="font-mono">{ticker}</span>
-            <X className="w-3 h-3 opacity-50 group-hover:opacity-100 hover:text-rose-400 transition-colors" onClick={e => closeStockTab(ticker, e)} />
-          </button>
-        ))}
+        {openTabs.map(ticker => {
+          const isActive = activeView === ticker;
+          return (
+            <div key={ticker} className="shrink-0 flex items-center">
+              <button
+                onClick={() => setActiveView(ticker)}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-colors ${
+                  isActive ? 'bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/20' : 'text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                <span className="font-mono">{ticker}</span>
+              </button>
+              {/* X separated from the nav button to prevent accidental closes */}
+              <button
+                onClick={e => closeStockTab(ticker, e)}
+                className={`ml-0.5 p-0.5 rounded transition-colors hover:text-rose-400 ${
+                  isActive ? 'text-blue-400/60 hover:text-rose-400' : 'text-transparent pointer-events-none'
+                }`}
+                tabIndex={isActive ? 0 : -1}
+                aria-label={`Close ${ticker} tab`}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          );
+        })}
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        <AnimatePresence mode="wait">
+        <AnimatePresence mode="sync">
           {activeView === 'portfolio' ? (
             <motion.div key="portfolio" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.1 }}>
               <PortfolioView
