@@ -8,6 +8,20 @@
 
 | Date | What changed | Why |
 | --- | --- | --- |
+| 2026-05-30 | Fixed `investmentSignal` never generated in Mode A (ticker-only). Root cause: `synthesize_verdict` only triggers when both ticker + file are present. Added guaranteed final CIO step in `runMasterAnalysis` that calls `generateInvestmentSignal()` after all parallel agents complete, wrapped in `withTimeout(30s)`. Result merged via `mergePartial` and emitted as a partial event so the dashboard badge updates in real time. | InvestmentSignalBadge always showed PENDING/Awaiting CIO in Mode A because the generation code path was never reached. |
+| 2026-05-30 | Agent timeout + flow hang fix. Added `withTimeout(30s)` helper in Orchestrator wrapping every agent in both `fetch_market_data` and `runParallelAnalysis` Phase 2. Timed-out agents emit an event and return an empty partial so `Promise.allSettled` always resolves and analysis never hangs. | Analysis page got stuck in Running state when WebIntelAgent or other agents failed to resolve. |
+| 2026-05-30 | Replaced all Chinese UI text and `refresh_interval` values with English throughout the codebase. `Scheduler.ts` constants, `buildUnavailableWebIntel/Compliance` fallback strings, and all `数值为本地货币，未换算` labels now English. Chinese comment in Scheduler translated. | App is intended for an international audience; Chinese strings were inconsistent with the rest of the English UI. |
+| 2026-05-30 | InvestmentSignalBadge moved inside the header flex container alongside the Market Price tile (was placed outside, causing layout break). Shows a grey PENDING tile when `investmentSignal` is null instead of rendering nothing. Badge is compact (no longer full-width). | Badge was invisible or breaking header layout. PENDING state makes the signal lifecycle explicit during loading. |
+| 2026-05-30 | PeerAgent retry: if fewer than 3 peers returned on first attempt, retries once with a stricter prompt constraint. Falls back to 3 placeholder entries if still empty. | Peer count was inconsistent (0–3 randomly) due to LLM under-returning on the first call. |
+| 2026-05-30 | WebIntelAgent news filter: drops results that do not mention the ticker or company name, and blocks results matching irrelevant keywords (`baba vanga`, `psychic`, `prophecy`, `astrology`, `horoscope`, etc.). | News panel was showing unrelated content such as Baba Vanga prophecy articles. |
+| 2026-05-30 | Added `ComplianceAlertAgent` (new file `src/agents/ComplianceAlertAgent.ts`). Runs 3 parallel Bright Data SERP searches (regulatory / legal / ESG compliance). Classifies urgency by keyword (high/medium/low), derives `overall_risk` from highest urgency. Registered in Orchestrator parallel dispatch for both ticker-only and PDF flows. Dashboard renders **Compliance & Risk Alerts** section (CollapsibleSection with ShieldAlert icon) below Live Web Intelligence. Types `ComplianceAlert` and `ComplianceOutput` added to `src/types.ts`. | Surfaces regulatory, legal, and ESG compliance signals as a dedicated structured panel. |
+| 2026-05-30 | Added `InvestmentSignal` interface and `generateInvestmentSignal()` to CIOAgent. Structured BUY/HOLD/SELL verdict with confidence, 3 key_reasons, 2 risk_warnings. Called in parallel with `crossAnalyze` in `runParallelAnalysis` Phase 3, in `synthesize_verdict` tool path, and as a final guaranteed step in `runMasterAnalysis`. `AnalysisResult` extended with `investmentSignal?`. | Replaces free-text investment verdict with a structured signal consumable by the UI and the audit log. |
+| 2026-05-30 | SQLite persistence via `better-sqlite3`. `server.ts` initialises `echo.db` with `analysis_log` and `validation_log` tables. Three new endpoints: `POST /api/log/analysis`, `GET /api/log/analysis/:ticker`, `POST /api/log/validation`. `src/utils/db.ts` provides browser-safe fetch wrappers (`saveAnalysisLog`, `getAnalysisHistory`, `getLatestSignal`, `logValidationWarningRemote`). `auditLog.ts` now also writes validation warnings to SQLite (fire-and-forget). Orchestrator calls `saveAnalysisLog` after both analysis flows. | Persists investment signals and validation warnings across sessions for audit and historical comparison. |
+| 2026-05-30 | Currency conversion utility (`src/utils/currencyConverter.ts`). `convertToUSD`, `formatWithCurrency`, `formatLargeWithCurrency` with 10-minute in-memory rate cache via Yahoo Finance `USDXXX=X` quotes. PeerComparison now shows local currency + `(~$X USD)` reference for price and market cap columns. Rate date shown in table header. | Peer table previously showed raw local values with no USD reference, making cross-currency comparison misleading. |
+| 2026-05-30 | Entity normalization (`src/utils/entityNormalizer.ts`). `normalizeEntity()` resolves company names to Yahoo Finance `longName` and `symbol`. `deduplicateBySymbol()` removes duplicate listings keeping the entry with highest `sort_value`. StakeholderAgent runs deduplication after `buildCandidates()`; PeerAgent deduplicates after `identifyPeers()`. | LLM was generating aliases of the same listed entity (e.g. "Samsung" and "Samsung Electronics Co Ltd") as separate entries. |
+| 2026-05-30 | WebIntelAgent hiring trend rewritten. Two parallel queries (expanding signals vs contracting signals); signal determined by result count ratio (>1.5× threshold); evidence reports exact counts. Previous single-query keyword-match approach almost always returned "contracting". | Hiring signal was biased toward CONTRACTING because the single search query returned layoff news for nearly all companies. |
+| 2026-05-30 | WebIntelAgent news search upgraded to 3 parallel queries covering different dimensions: (1) latest news on financial sites, (2) product/partnership/earnings, (3) analyst ratings. Results merged, title-deduped, sorted by date descending, capped at 10. Previous single `earnings news 2025` query produced low-diversity results. | Improves news panel coverage across events, analyst moves, and product news rather than only financial reporting. |
+| 2026-05-30 | README retitled to **Echo — Financial Intelligence Platform**. Removed all references to Milan AI Week Hackathon, ForcV, and FinAgent V2. Added Web Data UNLOCKED Hackathon 2026 + Bright Data attribution line. Removed Google AI Studio banner image. | Rebranding for Web Data UNLOCKED Hackathon submission. |
 | 2026-05-30 | Added WebIntelAgent with Bright Data SERP integration for live news, hiring, regulatory, and competitive signals. Dashboard now reads `data.webIntel`, includes `webIntel` in section state/export toggles, and renders a Live Web Intelligence section before ESG. Orchestrator runs WebIntelAgent in both PDF and ticker-only flows and returns a low-confidence placeholder with `data_gaps` when Bright Data is unavailable. | Ensures the Bright Data intelligence panel appears reliably and live web data failures are visible instead of silently hiding the section. |
 | 2026-05-30 | Refined stakeholder and peer comparison UX: Stakeholder modal groups candidates by selected industry with upstream/downstream for relationship understanding and peers for comparison; selected entity analysis separates peer KPI comparison from supply-chain relationship analysis. Peer comparison now displays price and market cap in local listing currency instead of forcing USD. | Reduces duplicated/confusing stakeholder candidate lists, clarifies that only peers should be compared, and prevents misleading cross-currency peer table values such as Korean stocks shown as USD. |
 | 2026-05-27 | Added EchoV data standards, base output validation with audit logging, ESGAgent, StakeholderAgent, Scheduler, AuditAgent/CostAgent placeholders, and Orchestrator integration for ESG/stakeholder outputs. Dashboard now renders structured ESG and stakeholder/management sections. | Establishes shared data contracts, exposes new analysis-layer agents in the report UI, and prepares refresh/audit/cost-control hooks for future expansion. |
@@ -59,28 +73,43 @@
 - 并行调度，收集输出，检测 gap，交由合成层
 - 未来会根据准确度、成本等综合权衡动态选择 agent 组合
 
-### 数据规范
-- 生成输出前遵循 DATA_STANDARDS.md
-- 生成输出后调用 validateAgentOutput() 校验
-- 校验不通过打 console.warn，不阻断流程
+### Data standards
+- Follow DATA_STANDARDS.md before generating any agent output
+- Call `validateAgentOutput()` after generating output; validation failure logs `console.warn` and does not block the flow
+- Validation warnings are also persisted to SQLite `validation_log` via `logValidationWarningRemote()` (fire-and-forget)
 
-### 新增 agent 步骤
-1. 确认层级（抓取 / 分析 / 合成）
-2. 在 src/agents/ 下新建文件
-3. 在 src/types.ts 中追加 Input/Output interface
-4. 实现 AgentEvent 流式输出，与现有 agent 保持一致
-5. 在 Orchestrator 的并行调度中注册
-6. 在本文件末尾补充该 agent 的一句话职责说明
+### Adding a new agent
+1. Confirm layer (Fetch / Analysis / Synthesis)
+2. Create file under `src/agents/`
+3. Append Input/Output interface to `src/types.ts`
+4. Implement `AgentEvent` streaming output consistent with existing agents
+5. Register in Orchestrator parallel dispatch (wrap with `withTimeout(30s)`)
+6. Add a one-line responsibility description at the bottom of this file
 
-### 刷新频率规范
-agent 输出中的 refresh_interval 字段使用以下标准值：
-- 市场数据（股价/交易量）："每10分钟（交易时段内）"
-- 新闻/事件："每天整点"
-- 公告/披露："每天 06:00"
-- 招聘数量："每周一 09:00"
-- 监管变化："每周一 09:00"
-- ESG 评级："每季度首个工作日 09:00"
+### refresh_interval standard values
+- Market data (price/volume): `"Every 10 minutes (trading hours)"`
+- News/events: `"Hourly"`
+- Announcements/filings: `"Daily 06:00"`
+- Hiring count: `"Every Monday 09:00"`
+- Regulatory changes: `"Every Monday 09:00"`
+- ESG ratings: `"First business day of each quarter"`
 
-### 内部控制 agent 预留接口（MVP 不实现，仅占位）
-- AuditAgent：审计数据质量，检测 agent 输出的一致性和合理性
-- CostAgent：追踪 API 调用成本，估算 token 消耗和费用
+### Agent timeout
+All agents in `runMasterAnalysis` and `runParallelAnalysis` are wrapped with `withTimeout(AGENT_TIMEOUT_MS = 30 000 ms)`.
+On timeout the agent emits a status event and returns an empty partial — analysis always completes.
+
+### Internal control agents (placeholder — not implemented in MVP)
+- AuditAgent: audits data quality, detects inconsistencies across agent outputs
+- CostAgent: tracks API call costs, estimates token usage and spend
+
+### Agent registry (one-line responsibilities)
+- **FundamentalAgent** — extracts financials, metrics, highlights, risks, and ticker from PDF reports
+- **QuantAgent** — fetches live market price, valuation multiples, and technical trend from Yahoo Finance
+- **PeerAgent** — identifies 3–5 sector-relevant publicly traded competitors; retries once if fewer than 3 returned
+- **ESGAgent** — produces structured E/S/G dimension scores and risk signals from PDF text or LLM knowledge
+- **StakeholderAgent** — maps upstream/downstream supply-chain entities and management info for a given ticker
+- **WebIntelAgent** — fetches live news, hiring trend, regulatory alerts, and competitive signals via Bright Data SERP
+- **ComplianceAlertAgent** — runs 3 parallel SERP searches (regulatory / legal / ESG compliance) and classifies urgency
+- **CIOAgent** — synthesises all agent outputs into a cross-analysis verdict, valuation opinion, and structured BUY/HOLD/SELL signal
+- **AuditAgent** — placeholder; reserved for output consistency auditing
+- **CostAgent** — placeholder; reserved for API cost tracking
