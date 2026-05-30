@@ -11,7 +11,7 @@ type Mode = 'D' | 'A' | 'B' | 'C';
 const TABS = [
   {
     id: 'D' as Mode,
-    label: 'Dashboard',
+    label: 'Portfolio',
     sublabel: 'Watchlist & Monitor',
     icon: LayoutDashboard,
     activeClass: 'bg-violet-500/10 text-violet-400 ring-1 ring-violet-500/20',

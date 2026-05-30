@@ -53,24 +53,111 @@ export class ESGAgent {
   ): Promise<ESGOutput> {
     onEvent?.({ agent: "ESGAgent", status: `Starting ESG analysis for ${input.ticker}` });
 
+    // ── Priority 1: Bright Data SERP ────────────────────────────────────────
+    try {
+      onEvent?.({ agent: "ESGAgent", status: "Fetching live ESG signals via Bright Data…" });
+      const res = await fetch(`/api/esg/${encodeURIComponent(input.ticker)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const output = this.buildOutputFromSERP(data, input);
+        const hasSignals = [output.environmental, output.social, output.governance]
+          .some(d => d.key_risks.length > 0 || d.improvement_signals.length > 0);
+
+        if (hasSignals) {
+          validateAgentOutput("ESGAgent", output);
+          onEvent?.({ agent: "ESGAgent", status: "Complete (Bright Data SERP)" });
+          return output;
+        }
+        onEvent?.({ agent: "ESGAgent", status: "SERP returned no ESG signals — falling back to PDF" });
+      }
+    } catch (e: any) {
+      onEvent?.({ agent: "ESGAgent", status: `Bright Data unavailable: ${e.message} — falling back to PDF` });
+    }
+
+    // ── Priority 2: PDF text ─────────────────────────────────────────────────
     const esgText = this.extractESGText(input.pdfText || "");
-    const hasPDFEvidence = esgText.length > 0;
+    if (esgText.length > 0) {
+      onEvent?.({ agent: "ESGAgent", status: "Using uploaded PDF ESG/CSR evidence" });
+      const output = this.buildOutputFromPDF(esgText, input);
+      validateAgentOutput("ESGAgent", output);
+      onEvent?.({ agent: "ESGAgent", status: "Complete (PDF extract)" });
+      return output;
+    }
 
-    onEvent?.({
-      agent: "ESGAgent",
-      status: hasPDFEvidence
-        ? "Using uploaded PDF ESG/CSR evidence"
-        : "No PDF ESG/CSR evidence or open-source ESG data available"
-    });
-
-    const output: ESGOutput = hasPDFEvidence
-      ? this.buildOutputFromPDF(esgText, input)
-      : this.buildUnavailableOutput(input);
-
+    // ── Priority 3: Unavailable ──────────────────────────────────────────────
+    onEvent?.({ agent: "ESGAgent", status: "No ESG data available" });
+    const output = this.buildUnavailableOutput(input);
     validateAgentOutput("ESGAgent", output);
-    onEvent?.({ agent: "ESGAgent", status: "Complete" });
-
+    onEvent?.({ agent: "ESGAgent", status: "Complete (no data)" });
     return output;
+  }
+
+  /**
+   * Builds ESGOutput from Bright Data SERP results.
+   * Extracts key_risks and improvement_signals from snippet text per dimension.
+   */
+  private static buildOutputFromSERP(
+    data: { environmental: any[]; social: any[]; governance: any[]; as_of: string },
+    input: ESGAgentInput
+  ): ESGOutput {
+    const buildDimension = (
+      snippets: Array<{ title: string; snippet: string; url: string; date: string | null }>,
+      theme: ESGTheme
+    ): ESGDimension => {
+      const allText = snippets.map(s => `${s.title} ${s.snippet}`).join(" ").toLowerCase();
+      const themeKws = THEME_KEYWORDS[theme].map(k => k.toLowerCase());
+      const hasRelevant = themeKws.some(kw => allText.includes(kw));
+
+      if (!hasRelevant || snippets.length === 0) return this.emptyDimension();
+
+      const riskWords = ["risk", "penalty", "violation", "fine", "lawsuit", "incident", "recall", "accident", "controversy", "scandal"];
+      const improveWords = ["improve", "reduce", "target", "initiative", "certif", "commit", "progress", "award", "achieve", "launch", "invest"];
+
+      const key_risks = snippets
+        .filter(s => {
+          const t = `${s.title} ${s.snippet}`.toLowerCase();
+          return themeKws.some(k => t.includes(k)) && riskWords.some(w => t.includes(w));
+        })
+        .map(s => s.snippet.slice(0, 160).trim())
+        .filter(Boolean)
+        .slice(0, 3);
+
+      const improvement_signals = snippets
+        .filter(s => {
+          const t = `${s.title} ${s.snippet}`.toLowerCase();
+          return themeKws.some(k => t.includes(k)) && improveWords.some(w => t.includes(w));
+        })
+        .map(s => s.snippet.slice(0, 160).trim())
+        .filter(Boolean)
+        .slice(0, 3);
+
+      // Score: 1-10 based on coverage (number of relevant signals found)
+      const totalSignals = key_risks.length + improvement_signals.length;
+      const score = totalSignals === 0 ? null : Math.min(10, Math.max(2, 5 + improvement_signals.length - key_risks.length));
+
+      return { score, key_risks, improvement_signals };
+    };
+
+    const environmental = buildDimension(data.environmental || [], "environmental");
+    const social        = buildDimension(data.social        || [], "social");
+    const governance    = buildDimension(data.governance    || [], "governance");
+
+    const scores = [environmental.score, social.score, governance.score].filter((s): s is number => s !== null);
+    const overall_score = scores.length > 0
+      ? Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1))
+      : null;
+
+    return {
+      as_of:            data.as_of || new Date().toISOString(),
+      data_source:      "brightdata_serp",
+      confidence:       scores.length >= 2 ? "medium" : "low",
+      refresh_interval: REFRESH_INTERVAL,
+      environmental,
+      social,
+      governance,
+      overall_score,
+      data_gaps: this.getDataGaps(input, { environmental, social, governance })
+    };
   }
 
   private static buildOutputFromPDF(esgText: string, input: ESGAgentInput): ESGOutput {

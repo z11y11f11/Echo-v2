@@ -217,6 +217,67 @@ async function startServer() {
     }
   });
 
+  // ── ESG data endpoint ────────────────────────────────────────────────────────
+  // GET /api/esg/:ticker
+  // Runs 3 parallel Bright Data SERP searches focused on ESG / sustainability.
+  // Returns raw signals grouped by E / S / G for ESGAgent to interpret.
+
+  app.get("/api/esg/:ticker", async (req, res) => {
+    const { ticker } = req.params;
+    const apiKey = process.env.BRIGHTDATA_API_KEY;
+    const zone   = process.env.BRIGHTDATA_SERP_ZONE || "serp_api1";
+
+    if (!apiKey) {
+      return res.status(503).json({ error: "BRIGHTDATA_API_KEY not configured", signals: [] });
+    }
+
+    const serpCall = async (query: string): Promise<any[]> => {
+      const r = await fetch("https://api.brightdata.com/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ zone, url: `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10`, format: "json" }),
+      });
+      if (!r.ok) throw new Error(`SERP ${r.status}`);
+      const payload = await r.json();
+      for (const key of ["organic", "organic_results"]) {
+        if (Array.isArray(payload?.[key])) return payload[key];
+        if (Array.isArray(payload?.body?.[key])) return payload.body[key];
+      }
+      if (typeof payload?.body === "string") {
+        try {
+          const p = JSON.parse(payload.body);
+          for (const key of ["organic", "organic_results"]) if (Array.isArray(p?.[key])) return p[key];
+        } catch {}
+      }
+      return [];
+    };
+    const safe = async (q: string) => { try { return await serpCall(q); } catch { return []; } };
+
+    try {
+      const [envResults, socialResults, govResults] = await Promise.all([
+        safe(`${ticker} environmental carbon emissions climate sustainability report 2024 2025`),
+        safe(`${ticker} social responsibility employee diversity community supply chain 2024 2025`),
+        safe(`${ticker} corporate governance board directors compliance ESG rating 2024 2025`),
+      ]);
+
+      const extractSnippets = (results: any[]) =>
+        results
+          .map(r => ({ title: r.title || "", snippet: r.snippet || r.description || "", url: r.link || r.url || "", date: r.date || null }))
+          .filter(r => r.title || r.snippet)
+          .slice(0, 6);
+
+      res.json({
+        ticker,
+        as_of: new Date().toISOString(),
+        environmental: extractSnippets(envResults),
+        social:        extractSnippets(socialResults),
+        governance:    extractSnippets(govResults),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message, signals: [] });
+    }
+  });
+
   // ── Full refresh endpoint ─────────────────────────────────────────────────────
   // POST /api/refresh/:ticker
   // Fetches live stock price + Bright Data SERP webIntel + compliance in parallel.
