@@ -19,7 +19,7 @@ import {
   Plus, X, RefreshCw, TrendingUp, TrendingDown,
   AlertTriangle, CheckCircle2, Clock,
   ExternalLink, Loader2, ShieldAlert, Globe,
-  History, Zap, RefreshCcw, Bot, BarChart3
+  History, Zap, RefreshCcw, Bot, BarChart3, Settings, AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CIOAgent } from '../agents/CIOAgent';
@@ -29,6 +29,9 @@ import type { AgentEvent } from '../services/ai';
 import type { AnalysisResult } from '../types';
 import AnalysisDashboard from './AnalysisDashboard';
 import StakeholderModal from './StakeholderModal';
+import SettingsPanel, {
+  type EchoSettings, loadSettings, saveSettings, getNextAutoRefreshLabel
+} from './SettingsPanel';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -219,10 +222,19 @@ export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { 
   // StakeholderModal
   const [stakeholderTicker, setStakeholderTicker] = useState<string | null>(null);
 
+  // Settings + auto-refresh
+  const [settings,       setSettings]      = useState<EchoSettings>(loadSettings);
+  const [showSettings,   setShowSettings]  = useState(false);
+  const [lastAutoRefresh, setLastAutoRefresh] = useState<string>(
+    () => localStorage.getItem('echo_last_auto_refresh') || ''
+  );
+
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Persist watchlist
   useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
+  // Persist settings
+  useEffect(() => { saveSettings(settings); }, [settings]);
   // Focus add input
   useEffect(() => { if (addOpen) setTimeout(() => inputRef.current?.focus(), 50); }, [addOpen]);
 
@@ -391,6 +403,57 @@ export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { 
     setRefreshAllActive(false);
   }, [watchlist, refreshAllActive, portfolioRefreshTicker]);
 
+  // ── Auto-refresh timer ───────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!settings.autoRefresh.enabled) return;
+
+    const nowInET = (): Date => {
+      const s = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+      return new Date(s);
+    };
+
+    const checkAndRefresh = () => {
+      const et   = nowInET();
+      const hour = et.getHours();
+      const day  = et.getDay(); // 0=Sun…6=Sat
+      const triggerHour = 16 + settings.autoRefresh.delayHours;
+
+      const isValidDay = settings.autoRefresh.days === 'weekdays'
+        ? (day >= 1 && day <= 5)
+        : day === 5;
+
+      if (!isValidDay || hour < triggerHour) return;
+
+      // Only once per day (ET date as key)
+      const todayKey = et.toISOString().slice(0, 10);
+      const lastKey  = localStorage.getItem('echo_last_auto_refresh');
+      if (lastKey === todayKey) return;
+
+      console.log(`[AutoRefresh] Triggering at ${et.toLocaleTimeString()} ET`);
+      localStorage.setItem('echo_last_auto_refresh', todayKey);
+      setLastAutoRefresh(todayKey);
+      refreshAllTickers();
+    };
+
+    checkAndRefresh(); // check immediately on mount / settings change
+    const timer = setInterval(checkAndRefresh, 60_000); // re-check every minute
+    return () => clearInterval(timer);
+  }, [settings.autoRefresh, refreshAllTickers]);
+
+  // ── Stale data helper ────────────────────────────────────────────────────────
+
+  const isStale = (ticker: string): boolean => {
+    const entry = liveData[ticker];
+    if (!entry?.refreshedAt) return false;
+    const iv = settings.intervals.news;
+    if (iv === 'off') return false;
+    const ageMs = Date.now() - new Date(entry.refreshedAt).getTime();
+    if (iv === 'daily')  return ageMs > 24 * 60 * 60 * 1000;
+    if (iv === 'weekly') return ageMs > 7 * 24 * 60 * 60 * 1000;
+    return false;
+  };
+
   // On mount: fetch all tickers + load cached liveData from localStorage
   useEffect(() => {
     const tickers = watchlist.map(w => w.ticker);
@@ -483,7 +546,35 @@ export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { 
             </div>
           );
         })}
+
+        {/* Settings button — right side of tab bar */}
+        <div className="ml-auto flex items-center gap-2 shrink-0 pl-2">
+          {settings.autoRefresh.enabled && (
+            <span className="text-[10px] text-slate-600 hidden sm:block">
+              {getNextAutoRefreshLabel(settings)}
+            </span>
+          )}
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors"
+            title="Dashboard Settings"
+          >
+            <Settings className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
+
+      {/* Settings Panel */}
+      <AnimatePresence>
+        {showSettings && (
+          <SettingsPanel
+            settings={settings}
+            onChange={setSettings}
+            onClose={() => setShowSettings(false)}
+            lastAutoRefresh={lastAutoRefresh || undefined}
+          />
+        )}
+      </AnimatePresence>
 
       {/* StakeholderModal — on-demand, doesn't navigate away */}
       {stakeholderTicker && (
@@ -517,6 +608,7 @@ export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { 
                 onRefreshAll={refreshAllTickers}
                 refreshAllActive={refreshAllActive}
                 refreshAllCurrent={refreshAllCurrent}
+                isStale={isStale}
               />
             </motion.div>
           ) : (
@@ -566,6 +658,7 @@ interface PortfolioViewProps {
   onRefreshAll: () => void;
   refreshAllActive: boolean;
   refreshAllCurrent: string;
+  isStale: (ticker: string) => boolean;
 }
 
 function PortfolioView({
@@ -573,7 +666,7 @@ function PortfolioView({
   signalCounts, totalHoldings, activeAlerts,
   addInput, setAddInput, addOpen, setAddOpen, addError, setAddError,
   inputRef, onAddTicker, onRemoveTicker, onSelectTicker, onRefresh,
-  onRefreshAll, refreshAllActive, refreshAllCurrent,
+  onRefreshAll, refreshAllActive, refreshAllCurrent, isStale,
 }: PortfolioViewProps) {
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
@@ -649,6 +742,7 @@ function PortfolioView({
                   const isFetching = loadingTickers.has(item.ticker);
                   const isRefreshing = refreshStatus[item.ticker] === 'refreshing';
                   const isErr  = refreshStatus[item.ticker] === 'error';
+                  const stale  = isStale(item.ticker);
                   const change = fmtChange(q?.regularMarketChangePercent);
                   const vc     = verdictStyle(latest?.verdict);
                   const refreshedAt = liveData[item.ticker]?.refreshedAt;
@@ -687,7 +781,8 @@ function PortfolioView({
                         {isErr ? (
                           <span className="text-[10px] text-rose-400">Refresh failed</span>
                         ) : (
-                          <span className="text-[11px] text-slate-500 flex items-center justify-end gap-1">
+                          <span className={`text-[11px] flex items-center justify-end gap-1 ${stale ? 'text-amber-500' : 'text-slate-500'}`}>
+                            {stale && <AlertCircle className="w-3 h-3" />}
                             <Clock className="w-3 h-3" />
                             {relTime(refreshedAt || latest?.created_at || latest?.generated_at)}
                           </span>
