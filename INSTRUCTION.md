@@ -8,6 +8,15 @@
 
 | Date | What changed | Why |
 | --- | --- | --- |
+| 2026-05-30 | StakeholderModal: translated all remaining Chinese UI strings to English — Step 1/2/3 titles, descriptions, Comprehensive mode button, CircleHelp tooltip. Candidate display columns capped at 3 per type in the modal view. | App is for an international audience; Chinese strings were inconsistent. |
+| 2026-05-30 | StakeholderAgent.identifyTopIndustries: deduplicate `top_industries` by industry name, keeping only the entry with the most recent period (e.g. FY2024 wins over FY2022 for the same industry). | Industry list was showing duplicate rows for the same segment across multiple years. |
+| 2026-05-30 | Unified candidate count to top 3 per type (upstream 3 + downstream 3 + peers 3 = max 9). Changed `perIndustryLimit = 3` and all `takeSortedByType` limits from 5 → 3 in StakeholderAgent. | Previously inconsistent: comprehensive mode returned 3, specific mode returned 5. |
+| 2026-05-30 | StakeholderAgent: prompt now requires LLM to provide `ticker` (Yahoo Finance symbol) and `exchange` for every candidate. Companies without a verifiable public ticker are excluded. `StakeholderEntity` type gains optional `ticker?` and `exchange?` fields. New `resolveTickersForCandidates()` method: if LLM did not supply a ticker, queries `/api/search/:name` to auto-resolve; result stored in `entity.ticker`. Failures are silent. | Stakeholder candidates had no ticker data, making them unusable for live market lookups and comparison. |
+| 2026-05-30 | CIOAgent.generateInvestmentSignal: calls `getLatestSignal(ticker)` before generating. If a previous signal exists, injects a stability clause into the prompt: only change verdict if there is clear new evidence (analyst rating change, material news event, or price moved >10% since last signal). Otherwise maintain previous verdict. | Signal was flipping between BUY/HOLD/SELL on every analysis run without any fundamental change. |
+| 2026-05-30 | Currency conversion bug fix in PeerComparison: removed erroneous `1/usd` inversion that was producing values ~1350× too large for KRW etc. `convertToUSD(1, cur)` already returns USD-per-local-unit; rate is now stored and multiplied correctly. `getRateDateLabel()` returns ISO YYYY-MM-DD. | Peer table was showing e.g. Samsung price as ~$400M USD instead of ~$221 USD. |
+| 2026-05-30 | AnalysisDashboard Market Price card: non-USD prices now show `(~$X.XX USD)` reference via new `stockUsdPrice` state + useEffect calling `convertToUSD`. | Header showed only local currency with no USD context for non-US stocks. |
+| 2026-05-30 | Added SignalTimeline component (`src/components/SignalTimeline.tsx`). Fetches `/api/log/history/:ticker` on mount; renders collapsible list of past signals with date, colour-coded verdict badge, confidence, expandable key_reasons and risk_warnings. Empty state handled. Added Signal History CollapsibleSection (default collapsed) below Cross Analysis in AnalysisDashboard. | Provides historical audit trail of investment signal changes for a given ticker. |
+| 2026-05-30 | server.ts: `/api/log/history/:ticker` alias added pointing to the same handler as `/api/log/analysis/:ticker`. Response now includes `created_at` field. | SignalTimeline component needs `created_at` for display; route alias improves semantic clarity. |
 | 2026-05-30 | Fixed `investmentSignal` never generated in Mode A (ticker-only). Root cause: `synthesize_verdict` only triggers when both ticker + file are present. Added guaranteed final CIO step in `runMasterAnalysis` that calls `generateInvestmentSignal()` after all parallel agents complete, wrapped in `withTimeout(30s)`. Result merged via `mergePartial` and emitted as a partial event so the dashboard badge updates in real time. | InvestmentSignalBadge always showed PENDING/Awaiting CIO in Mode A because the generation code path was never reached. |
 | 2026-05-30 | Agent timeout + flow hang fix. Added `withTimeout(30s)` helper in Orchestrator wrapping every agent in both `fetch_market_data` and `runParallelAnalysis` Phase 2. Timed-out agents emit an event and return an empty partial so `Promise.allSettled` always resolves and analysis never hangs. | Analysis page got stuck in Running state when WebIntelAgent or other agents failed to resolve. |
 | 2026-05-30 | Replaced all Chinese UI text and `refresh_interval` values with English throughout the codebase. `Scheduler.ts` constants, `buildUnavailableWebIntel/Compliance` fallback strings, and all `数值为本地货币，未换算` labels now English. Chinese comment in Scheduler translated. | App is intended for an international audience; Chinese strings were inconsistent with the rest of the English UI. |
@@ -102,14 +111,38 @@ On timeout the agent emits a status event and returns an empty partial — analy
 - AuditAgent: audits data quality, detects inconsistencies across agent outputs
 - CostAgent: tracks API call costs, estimates token usage and spend
 
+### StakeholderAgent rules
+- Candidate count is capped at **3 per type** (upstream 3 + downstream 3 + peers 3 = max 9 total).
+- Every candidate LLM returns must include a `ticker` (Yahoo Finance symbol) and `exchange`; private companies without a public ticker are excluded.
+- After LLM output, `resolveTickersForCandidates()` auto-fills missing tickers via `/api/search/:name`.
+- `top_industries` is deduplicated by industry name — only the most recent period entry is kept.
+- `StakeholderEntity` fields: `name`, `ticker?`, `exchange?`, `type`, `industry`, `description`, `sort_value`, `sort_metric`, `analysis?`.
+
+### CIOAgent signal stability
+- `generateInvestmentSignal()` calls `getLatestSignal(ticker)` before generating.
+- If a previous signal exists, a stability clause is injected into the prompt: only change the verdict if there is clear new evidence (analyst rating change, material news, or price moved >10%).
+- This prevents the signal from flipping on every run without fundamental new information.
+
+### Currency conversion
+- `src/utils/currencyConverter.ts` provides `convertToUSD(amount, fromCurrency)` using Yahoo Finance `USDXXX=X` quotes.
+- `convertToUSD(1, cur)` returns **USD per 1 local unit** (e.g. `convertToUSD(1, 'KRW') ≈ 0.00074`).
+- To display USD equivalent: `localPrice * convertToUSD(1, currency)` — never invert this rate.
+- Rates are cached in-memory for 10 minutes.
+- `getRateDateLabel()` returns today as `YYYY-MM-DD`.
+
+### Signal history
+- Every completed analysis with an `investmentSignal` is persisted to SQLite `analysis_log` via `saveAnalysisLog()`.
+- `SignalTimeline` component (`src/components/SignalTimeline.tsx`) fetches `/api/log/history/:ticker` and renders a collapsible timeline.
+- Server routes: `POST /api/log/analysis`, `GET /api/log/analysis/:ticker` (alias: `GET /api/log/history/:ticker`), `POST /api/log/validation`.
+
 ### Agent registry (one-line responsibilities)
 - **FundamentalAgent** — extracts financials, metrics, highlights, risks, and ticker from PDF reports
 - **QuantAgent** — fetches live market price, valuation multiples, and technical trend from Yahoo Finance
 - **PeerAgent** — identifies 3–5 sector-relevant publicly traded competitors; retries once if fewer than 3 returned
 - **ESGAgent** — produces structured E/S/G dimension scores and risk signals from PDF text or LLM knowledge
-- **StakeholderAgent** — maps upstream/downstream supply-chain entities and management info for a given ticker
-- **WebIntelAgent** — fetches live news, hiring trend, regulatory alerts, and competitive signals via Bright Data SERP
+- **StakeholderAgent** — maps upstream/downstream/peer entities (top 3 each) with auto-resolved tickers and management info
+- **WebIntelAgent** — fetches live news (3 parallel queries), hiring trend (2-query comparison), regulatory alerts, and competitive signals via Bright Data SERP
 - **ComplianceAlertAgent** — runs 3 parallel SERP searches (regulatory / legal / ESG compliance) and classifies urgency
-- **CIOAgent** — synthesises all agent outputs into a cross-analysis verdict, valuation opinion, and structured BUY/HOLD/SELL signal
+- **CIOAgent** — synthesises all agent outputs into cross-analysis, valuation opinion, and BUY/HOLD/SELL signal with stability constraint
 - **AuditAgent** — placeholder; reserved for output consistency auditing
 - **CostAgent** — placeholder; reserved for API cost tracking
