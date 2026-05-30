@@ -102,16 +102,18 @@ export function PeerComparison({ competitors, currentTicker }: PeerComparisonPro
 
         if (!active) return;
 
-        // Fetch USD rates for all unique currencies found
+        // Fetch USD rates for all unique currencies found.
+        // convertToUSD(1, cur) already returns USD per 1 unit of local currency
+        // e.g. convertToUSD(1, 'KRW') ≈ 0.00074  →  price * 0.00074 = USD value
         const currencies = [...new Set(Object.values(newPeerData).map((d: any) => d.currency).filter(Boolean))];
         const rateEntries = await Promise.all(
           currencies.map(async (cur: string) => {
-            const usd = await convertToUSD(1, cur).catch(() => NaN);
-            return [cur, isNaN(usd) ? NaN : 1 / usd] as [string, number]; // usd per 1 local unit
+            const usdPerUnit = await convertToUSD(1, cur).catch(() => NaN);
+            return [cur, usdPerUnit] as [string, number];
           })
         );
         const rates: Record<string, number> = {};
-        for (const [cur, rate] of rateEntries) if (!isNaN(rate)) rates[cur] = rate;
+        for (const [cur, rate] of rateEntries) if (!isNaN(rate) && rate > 0) rates[cur] = rate;
         if (active) setUsdRates(rates);
 
         // Ensure current ticker is first in display order
@@ -192,20 +194,20 @@ export function PeerComparison({ competitors, currentTicker }: PeerComparisonPro
                            {d.role}
                          </span>
                        </td>
-                       <td className="px-6 py-4 font-mono text-slate-300 text-xs">
+                       <td className="px-6 py-4 font-mono text-slate-300 text-xs leading-relaxed">
                          {(() => {
                            const cur = (d as any).currency || '';
-                           const rate = usdRates[cur];
-                           const usd = rate && d.price ? d.price * rate : undefined;
+                           const rate = usdRates[cur]; // USD per 1 local unit
+                           const usd = (rate && d.price) ? d.price * rate : undefined;
                            return formatWithCurrency(d.price!, cur, usd);
                          })()}
                        </td>
-                       <td className="px-6 py-4 font-mono text-slate-300 text-xs">
+                       <td className="px-6 py-4 font-mono text-slate-300 text-xs leading-relaxed">
                          {(() => {
                            const cur = (d as any).currency || '';
                            const mc = (d as any).marketCap;
-                           const rate = usdRates[cur];
-                           const usd = rate && mc ? mc * rate : undefined;
+                           const rate = usdRates[cur]; // USD per 1 local unit
+                           const usd = (rate && mc) ? mc * rate : undefined;
                            return formatLargeWithCurrency(mc, cur, usd);
                          })()}
                        </td>

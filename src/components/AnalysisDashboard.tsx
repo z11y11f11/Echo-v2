@@ -12,9 +12,11 @@ import {
   Tooltip, ResponsiveContainer, Legend
 } from 'recharts';
 import { AnalysisResult, StockData, HistoricalBar, ValuationSummary, CrossAnalysisResult, ComplianceOutput, InvestmentSignal } from '../types';
+import { convertToUSD } from '../utils/currencyConverter';
 import { ValuationModels } from './ValuationModels';
 import { PeerComparison } from './PeerComparison';
 import StakeholderModal from './StakeholderModal';
+import SignalTimeline from './SignalTimeline';
 import { crossAnalyze, synthesizeValuationVerdict } from '../services/ai';
 import { toPng } from 'html-to-image';
 import jsPDF from 'jspdf';
@@ -67,6 +69,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
   const [loadingStock, setLoadingStock] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [loadingSummary, setLoadingSummary] = useState(false);
+  const [stockUsdPrice, setStockUsdPrice] = useState<number | null>(null);
   const [isStakeholderModalOpen, setIsStakeholderModalOpen] = useState(false);
   const [stakeholderOverride, setStakeholderOverride] = useState(data.stakeholder);
   const [dashboardView, setDashboardView] = useState<'report' | 'peers'>('report');
@@ -82,7 +85,8 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
     compliance: true,
     esg: true,
     stakeholder: true,
-    competitors: false
+    competitors: false,
+    signalHistory: false
   });
 
   const dashboardRef = useRef<HTMLDivElement>(null);
@@ -166,7 +170,7 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
   };
 
   const setAllSections = (isOpen: boolean) => {
-    setSections({ metrics: isOpen, history: isOpen, valuation: isOpen, summary: isOpen, insights: isOpen, webIntel: isOpen, compliance: isOpen, esg: isOpen, stakeholder: isOpen, competitors: isOpen });
+    setSections({ metrics: isOpen, history: isOpen, valuation: isOpen, summary: isOpen, insights: isOpen, webIntel: isOpen, compliance: isOpen, esg: isOpen, stakeholder: isOpen, competitors: isOpen, signalHistory: isOpen });
   };
 
   const allExpanded = Object.values(sections).every(Boolean);
@@ -206,6 +210,16 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
 
     resolveAndFetch();
   }, [company.ticker]);
+
+  useEffect(() => {
+    if (!stock?.regularMarketPrice || !stock?.currency || stock.currency === 'USD') {
+      setStockUsdPrice(null);
+      return;
+    }
+    convertToUSD(stock.regularMarketPrice, stock.currency)
+      .then(usd => setStockUsdPrice(isNaN(usd) ? null : usd))
+      .catch(() => setStockUsdPrice(null));
+  }, [stock]);
 
   useEffect(() => {
     if (valSummary && stock && !loadingStock && !loadingSummary && !crossAnalysis && !loadingCrossAnalysis && data.company) {
@@ -364,7 +378,8 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
               <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Market Price</span>
               <div className="flex items-center gap-2">
                 <span className="text-lg font-bold text-white font-mono">
-                  {stock.currency === 'USD' ? '$' : ''}{stock.regularMarketPrice?.toFixed(2)}
+                  {stock.currency === 'USD' ? '$' : (stock.currency || '')}{' '}
+                  {stock.regularMarketPrice?.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                 </span>
                 <span className={`text-sm font-bold flex items-center ${(stock.regularMarketChangePercent || 0) >= 0 ? 'text-emerald-400 drop-shadow-[0_0_5px_rgba(52,211,153,0.5)]' : 'text-rose-400 drop-shadow-[0_0_5px_rgba(251,113,133,0.5)]'}`}>
                   {(stock.regularMarketChangePercent || 0) >= 0
@@ -373,7 +388,12 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
                   {Math.abs(stock.regularMarketChangePercent || 0).toFixed(2)}%
                 </span>
               </div>
-              <span className="mt-1 text-[10px] text-amber-400 font-bold">Values in local currency · not converted</span>
+              {stockUsdPrice !== null && stock.currency !== 'USD' && (
+                <span className="mt-0.5 text-[11px] text-slate-400 font-mono">
+                  (~${stockUsdPrice.toFixed(2)} USD)
+                </span>
+              )}
+              <span className="mt-0.5 text-[10px] text-amber-400 font-bold">Local currency</span>
             </div>
           )}
           <button
@@ -728,6 +748,20 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
                 </ul>
               </div>
             </div>
+          </CollapsibleSection>
+        </div>
+      )}
+
+      {/* ── Signal History ────────────────────────────────────────────────── */}
+      {(resolvedTicker || company.ticker) && (
+        <div className="pdf-section">
+          <CollapsibleSection
+            title="Signal History"
+            icon={<BarChart3 className="w-5 h-5 text-indigo-400" />}
+            isOpen={sections.signalHistory}
+            onToggle={() => toggleSection('signalHistory')}
+          >
+            <SignalTimeline ticker={resolvedTicker || company.ticker} />
           </CollapsibleSection>
         </div>
       )}

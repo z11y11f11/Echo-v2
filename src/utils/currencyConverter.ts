@@ -49,10 +49,10 @@ export async function convertToUSD(amount: number, fromCurrency: string): Promis
 }
 
 /**
- * Returns the rate fetch date label (today).
+ * Returns today's date in YYYY-MM-DD format for rate attribution.
  */
 export function getRateDateLabel(): string {
-  return new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return new Date().toISOString().slice(0, 10);
 }
 
 /**

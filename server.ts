@@ -204,8 +204,9 @@ async function startServer() {
     }
   });
 
-  // GET /api/log/analysis/:ticker — retrieve history for a ticker
-  app.get("/api/log/analysis/:ticker", (req, res) => {
+  // GET /api/log/analysis/:ticker — retrieve signal history for a ticker
+  // Also aliased as /api/log/history/:ticker for SignalTimeline component
+  const handleSignalHistory = (req: any, res: any) => {
     try {
       const rows = selectAnalysisByTicker.all(req.params.ticker) as any[];
       const signals = rows.map(row => ({
@@ -214,12 +215,15 @@ async function startServer() {
         key_reasons: JSON.parse(row.key_reasons || "[]"),
         risk_warnings: JSON.parse(row.risk_warnings || "[]"),
         generated_at: row.as_of,
+        created_at: row.created_at,
       }));
       res.json(signals);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
-  });
+  };
+  app.get("/api/log/analysis/:ticker", handleSignalHistory);
+  app.get("/api/log/history/:ticker", handleSignalHistory);
 
   // POST /api/log/validation — persist agent validation warnings
   app.post("/api/log/validation", (req, res) => {
