@@ -1,4 +1,4 @@
-# FinAgent V2 Instructions
+# Echo — Financial Intelligence Platform · Instructions
 
 ## Build Rules
 

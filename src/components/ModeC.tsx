@@ -7,7 +7,7 @@ import AnalysisDashboard from './AnalysisDashboard';
 import { AnalysisResult } from '../types';
 
 const INTRO =
-  "Hello! I'm FinAgent — an autonomous multi-agent investment analysis system.\n\n" +
+  "Hello! I'm Echo — an autonomous multi-agent financial intelligence system.\n\n" +
   "I specialise in analysing financial reports and listed company data: valuation models, " +
   "ESG profiles, strategic risks, peer comparisons, and investment verdicts.\n\n" +
   "What would you like to analyse today?";

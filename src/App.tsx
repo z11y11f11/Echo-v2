@@ -58,8 +58,8 @@ export default function App() {
               <Shield className="w-full h-full" />
             </div>
             <div>
-              <div className="text-xl font-bold font-display tracking-tight text-white leading-none">FinAgent</div>
-              <div className="text-[10px] text-slate-500 uppercase tracking-widest mt-1">V2 Multi-Agent</div>
+              <div className="text-xl font-bold font-display tracking-tight text-white leading-none">Echo</div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-widest mt-1">Financial Intelligence</div>
             </div>
           </div>
 

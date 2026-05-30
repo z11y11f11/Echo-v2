@@ -168,7 +168,7 @@ async function runOpenAIFallback(prompt: string, schemaProperties: any, required
     text: {
       format: {
         type: "json_schema",
-        name: "finagent_analysis",
+        name: "echo_analysis",
         strict: false,
         schema: {
           type: "object",
@@ -205,7 +205,7 @@ export async function conductDialogueStep(
     messages: [
       {
         role: 'system',
-        content: `You are FinAgent Orchestrator — an autonomous multi-agent investment analysis system.
+        content: `You are Echo Orchestrator — an autonomous multi-agent financial intelligence system.
 You specialise in:
 - Financial report analysis (PDF annual reports, earnings releases)
 - Listed company market data: valuation multiples, KPIs, peer comparison
@@ -288,7 +288,7 @@ export async function planOrchestratorToolCalls(input: {
     messages: [
       {
         role: "system",
-        content: `You are the FinAgent V2 Orchestrator. Decide which tools to call and in what order based on the user's request and available inputs.
+        content: `You are the Echo Orchestrator. Decide which tools to call and in what order based on the user's request and available inputs.
 Available tools map to agents:
 - analyze_document: FundamentalAgent — extracts highlights, risks, ESG, metrics from an uploaded PDF.
 - fetch_market_data: QuantAgent — fetches live market data, valuation multiples, price, ratios for a ticker.
