@@ -80,6 +80,7 @@ export class CIOAgent {
    * Confidence reflects signal consistency across all available data.
    */
   static async generateInvestmentSignal(context: any): Promise<InvestmentSignal> {
+    console.log("[CIOAgent] generateInvestmentSignal() called — company:", context?.company?.name, context?.company?.ticker);
     const schemaProperties = {
       verdict: { type: Type.STRING, enum: ["BUY", "HOLD", "SELL"] },
       confidence: { type: Type.STRING, enum: ["high", "medium", "low"] },

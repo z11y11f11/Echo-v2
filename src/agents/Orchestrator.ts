@@ -91,6 +91,28 @@ export class OrchestratorAgent {
       await this.fillGapsWithKnowledge(gaps, result, input, onEvent);
     }
 
+    // ── CIO: generate investment signal (always, for all modes) ──────────
+    // synthesize_verdict only fires when both ticker + file are present,
+    // so we call generateInvestmentSignal here as a guaranteed final step.
+    if (!(result as any).investmentSignal && result.company) {
+      onEvent({ agent: "CIOAgent", status: "Generating investment signal..." });
+      console.log("[CIOAgent] generateInvestmentSignal called from runMasterAnalysis final step");
+      try {
+        const investmentSignal = await withTimeout(
+          CIOAgent.generateInvestmentSignal(result),
+          undefined as any,
+          "CIOAgent.generateInvestmentSignal",
+          (lbl) => onEvent({ agent: "CIOAgent", status: `${lbl} timed out` })
+        );
+        if (investmentSignal) {
+          result = this.mergePartial(result, { investmentSignal } as Partial<AnalysisResult>);
+          onEvent({ agent: "CIOAgent", status: "Investment signal complete", partial: { investmentSignal } as Partial<AnalysisResult> });
+        }
+      } catch (e: any) {
+        onEvent({ agent: "CIOAgent", status: `Investment signal failed: ${e.message}` });
+      }
+    }
+
     if ((result as any).investmentSignal && result.company?.ticker) {
       saveAnalysisLog(result.company.ticker, (result as any).investmentSignal, result.company.name || "");
     }
