@@ -220,25 +220,80 @@ export class WebIntelAgent {
     expandingResults: OrganicResult[],
     contractingResults: OrganicResult[]
   ): WebIntelOutput["hiring_trend"] {
-    const x = expandingResults.length;
-    const y = contractingResults.length;
+    // ── Extract concrete evidence from snippets ───────────────────────────────
 
-    if (x === 0 && y === 0) {
-      return { signal: "unknown", evidence: "No hiring results found." };
+    const getText = (results: OrganicResult[]) =>
+      results.map(r => `${r.title || ""} ${r.snippet || r.description || ""}`).join(" ");
+
+    const expandingText   = getText(expandingResults);
+    const contractingText = getText(contractingResults);
+    const allText         = `${expandingText} ${contractingText}`;
+
+    // Numbers: "laid off 5,000 employees", "cut 1,200 jobs", "hiring 3,000 engineers"
+    const layoffNums   = [...allText.matchAll(/(?:laid?\s*off?|cut(?:ting)?|eliminat(?:ing|ed)|reduc(?:ing|ed)?)\s+(?:about\s+|approximately\s+|over\s+)?(\d[\d,]+)\s+(?:employees|workers|jobs|roles|positions|staff)/gi)];
+    const hiringNums   = [...allText.matchAll(/(?:hir(?:ing|ed?)|add(?:ing|ed)?|creat(?:ing|ed?)|recruit(?:ing|ed?))\s+(?:about\s+|approximately\s+|over\s+)?(\d[\d,]+)\s+(?:employees|workers|engineers|people|roles|positions|jobs)/gi)];
+    const openRolesNums = [...allText.matchAll(/(\d[\d,]+)\+?\s+(?:open|new|available)\s+(?:positions|roles|jobs|openings)/gi)];
+    const freezeMatch  = /hiring\s+freeze|freeze\s+hiring|pausing\s+(?:all\s+)?hiring/i.test(contractingText);
+    const expansionMatch = /expan(?:ding|sion)\s+(?:its\s+)?(?:workforce|headcount|team|engineering)|significant(?:ly)?\s+(?:increasing|growing)\s+(?:its\s+)?(?:workforce|headcount|team)/i.test(expandingText);
+
+    // ── Build specific evidence sentences ─────────────────────────────────────
+
+    const facts: string[] = [];
+
+    for (const m of layoffNums.slice(0, 2)) {
+      facts.push(`Layoff reported: ${m[0].trim()}.`);
+    }
+    for (const m of hiringNums.slice(0, 2)) {
+      facts.push(`Hiring reported: ${m[0].trim()}.`);
+    }
+    for (const m of openRolesNums.slice(0, 1)) {
+      facts.push(`${m[0].trim()} found in job postings.`);
+    }
+    if (freezeMatch) facts.push("Hiring freeze language detected in recent results.");
+    if (expansionMatch) facts.push("Workforce expansion language detected in recent results.");
+
+    // Add top headline snippets if no numeric facts
+    if (facts.length === 0) {
+      const topSnippets = [...contractingResults, ...expandingResults]
+        .slice(0, 2)
+        .map(r => r.snippet || r.description || "")
+        .filter(s => s.length > 30)
+        .map(s => s.slice(0, 120).trim());
+      facts.push(...topSnippets);
+    }
+
+    // ── Determine signal ───────────────────────────────────────────────────────
+
+    const hasConcreteLayoff  = layoffNums.length > 0 || freezeMatch;
+    const hasConcreteHiring  = hiringNums.length > 0 || openRolesNums.length > 0 || expansionMatch;
+
+    // No concrete evidence at all → skip (return unknown with no evidence)
+    if (!hasConcreteLayoff && !hasConcreteHiring && facts.length === 0) {
+      return { signal: "unknown", evidence: "" };
     }
 
     let signal: WebIntelOutput["hiring_trend"]["signal"];
-    if (x > y * 1.5) {
-      signal = "expanding";
-    } else if (y > x * 1.5) {
+    if (hasConcreteLayoff && !hasConcreteHiring) {
       signal = "contracting";
+    } else if (hasConcreteHiring && !hasConcreteLayoff) {
+      signal = "expanding";
+    } else if (hasConcreteLayoff && hasConcreteHiring) {
+      // Both signals present — use numeric magnitude to decide
+      const layoffTotal  = layoffNums.reduce((s, m) => s + parseInt(m[1].replace(/,/g, ""), 10), 0);
+      const hiringTotal  = hiringNums.reduce((s, m) => s + parseInt(m[1].replace(/,/g, ""), 10), 0);
+      signal = layoffTotal > hiringTotal * 1.5 ? "contracting"
+             : hiringTotal > layoffTotal * 1.5 ? "expanding"
+             : "stable";
     } else {
-      signal = "stable";
+      // Only soft signals (snippets but no numbers)
+      const x = expandingResults.length;
+      const y = contractingResults.length;
+      signal = x > y * 1.5 ? "expanding" : y > x * 1.5 ? "contracting" : "stable";
     }
 
     return {
       signal,
-      evidence: `Found ${x} hiring signals vs ${y} contraction signals from web search`,
+      evidence: facts.join(" ") || `${expandingResults.length} hiring vs ${contractingResults.length} contraction results.`,
     };
   }
 

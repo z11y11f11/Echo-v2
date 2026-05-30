@@ -867,13 +867,16 @@ function WebIntelView({ webIntel }: { webIntel: any }) {
         </div>
 
         <div className="space-y-5">
-          <div className="p-5 bg-[#0a0d14]/80 border border-slate-800 rounded-xl">
-            <div className="text-xs font-bold text-cyan-400 uppercase tracking-widest mb-3">Hiring Trend</div>
-            <div className="flex items-center gap-3 mb-3">
-              <HiringBadge signal={webIntel.hiring_trend?.signal || 'unknown'} />
+          {/* Only render hiring trend if signal is meaningful and evidence is concrete */}
+          {webIntel.hiring_trend?.signal !== 'unknown' && webIntel.hiring_trend?.evidence && (
+            <div className="p-5 bg-[#0a0d14]/80 border border-slate-800 rounded-xl">
+              <div className="text-xs font-bold text-cyan-400 uppercase tracking-widest mb-3">Hiring Trend</div>
+              <div className="flex items-center gap-3 mb-3">
+                <HiringBadge signal={webIntel.hiring_trend.signal} />
+              </div>
+              <p className="text-sm text-slate-300 leading-relaxed">{webIntel.hiring_trend.evidence}</p>
             </div>
-            <p className="text-sm text-slate-300 leading-relaxed">{webIntel.hiring_trend?.evidence || 'Live data unavailable'}</p>
-          </div>
+          )}
 
           <div className="p-5 bg-[#0a0d14]/80 border border-slate-800 rounded-xl">
             <div className="text-xs font-bold text-cyan-400 uppercase tracking-widest mb-3">Regulatory Alerts</div>
