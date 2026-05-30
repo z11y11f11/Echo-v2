@@ -8,6 +8,19 @@
 
 | Date | What changed | Why |
 | --- | --- | --- |
+| 2026-05-31 | StakeholderModal rewritten as a one-page browse view (no more 3-step wizard). On open, calls new `StakeholderAgent.getBrowseData(ticker)` which returns `{ topIndustries, candidates, companyIntro }` in one shot. Displays company intro + top 5 revenue segments + top 5 upstream/downstream/peers. Replaced `onComplete(output)` prop with `onSelectEntity(ticker, name)`. In WatchlistDashboard, clicking an entity row adds the ticker to the watchlist (if new), fetches its data, and opens a monitor tab — no analysis is triggered until user clicks Run Full Analysis inside that tab. `perIndustryLimit` / `takeSortedByType` raised from 3 → 5 to match "top 5" terminology. | Old wizard required 3 click-throughs to see who the stakeholders were. New flow shows everything immediately and turns each entity into a one-click drill-down to its monitor view. |
+| 2026-05-31 | AnalysisDashboard header redesigned. `InvestmentSignalBadge` (260px tile) was previously placed inside the right-hand toolbar alongside the Market Price tile and four action buttons, which broke the layout on any normal screen width. Now: header is a single compact row (company identity left, slim price chip + 4 icon buttons right). Investment signal renders as a separate full-width `InvestmentSignalBanner` below the header: large verdict + confidence on the left, 2-column reasons + warnings on the right. Toolbar buttons standardised to 36px icons with `title` tooltips. | Old header was unusable: signal tile, price tile, and toolbar buttons all competed for the same horizontal space, breaking into multiple rows and squashing buttons. |
+| 2026-05-31 | Portfolio individual stock view enhancements. (1) Company description added under ticker name — first 1–2 sentences of `assetProfile.longBusinessSummary` fetched from `/api/stock/:ticker/summary`. Falls back to `sector · industry` when description is missing. `StockQuote` interface gains optional `description` / `sector` / `industry` fields. (2) Investment Signal + Market Data moved to side-by-side cards at the top (was stacked vertically). (3) News Signals and Compliance Alerts cards are now expandable via "Show N more" toggle — previously hard-capped at 3 items. News items now show date when available. | Users wanted context on what the company actually does, and the ability to drill into more than 3 news items / alerts without leaving the dashboard. |
+| 2026-05-31 | StakeholderAgent enriches candidates with real Yahoo Finance data. New `enrichCandidatesWithYahooData()` runs after `deduplicateBySymbol`: for each candidate with a resolved ticker, fetches `/api/stock/:t/summary` to overwrite the LLM-provided `name` with the official `longName`, populate `description` from `assetProfile.longBusinessSummary`, and replace `sort_value` with real market cap formatted as `X.XB CUR` or `X.XT CUR` (peers only). `analyzeManagement()` similarly tries Yahoo Finance `assetProfile.companyOfficers` first to extract CEO/CFO real names, falling back to LLM. `/api/stock/:t/summary` now includes `assetProfile` module. | Old StakeholderAgent fully trusted LLM data: most candidates ended up as `no_public_data`, management was `null`, candidates had no market cap. Yahoo Finance provides verified ground truth for these fields. |
+| 2026-05-31 | WebIntelAgent hiring trend now requires concrete evidence. `analyzeHiringTrend()` parses snippets for specific numbers (`laid off 5,000 employees`, `hiring 3,000 engineers`, `300+ open positions`) and soft signals (`hiring freeze`, `workforce expansion`). Signal determination prioritises numeric magnitude; falls back to soft-signal ratio. When neither concrete evidence nor meaningful snippet text is present, returns `{ signal: 'unknown', evidence: '' }`. Dashboard `WebIntelView` only renders the Hiring Trend panel when signal is meaningful and evidence is non-empty. | Old "Found X vs Y signals" evidence string was meaningless; many companies got mislabelled because raw result counts don't reflect actual hiring intent. |
+| 2026-05-31 | Auto-refresh after market close. New `SettingsPanel.tsx` slide-in drawer with two sections: (1) Auto-Refresh — enable/disable, delay after 4 PM ET close (+1/+2/+4/+8h), schedule (every trading day vs Fridays only), toggles for including news/compliance and CIO signal regeneration; (2) Data Freshness Intervals — per-data-type thresholds (price 15min/1h/4h/daily, news daily/weekly, compliance daily/weekly/monthly, signal after_refresh/weekly). Settings persisted to `echo_settings_v1`. WatchlistDashboard runs `setInterval(checkAndRefresh, 60_000)` using `Intl` API for ET timezone (DST-safe); fires `refreshAllTickers()` once per ET calendar day. `lastAutoRefresh` stored in localStorage. Portfolio table shows amber `AlertCircle` + amber timestamp on stale rows. ⚙ Settings button added to inner tab bar with "Next: Mon 20:00 ET" label on larger screens. | Users wanted scheduled refresh and per-type control over when data becomes "stale". |
+| 2026-05-31 | ESGAgent now uses 3-tier data source priority: (1) Bright Data SERP via new `GET /api/esg/:ticker` endpoint (3 parallel queries: environmental + social + governance), extracts key_risks and improvement_signals per dimension from snippet text; (2) PDF text extraction (existing keyword scoring); (3) Unavailable. Server endpoint gracefully returns 503 when `BRIGHTDATA_API_KEY` is missing. | Old ESGAgent only worked when a PDF was uploaded — Mode A and Dashboard had no ESG data. Bright Data fills the gap. |
+| 2026-05-31 | App.tsx tab label: "Dashboard" → "Portfolio". | Reflects the holdings-list mental model. |
+| 2026-05-31 | Market Analysis (Mode A) gains bookmarked tabs identical to Portfolio. New tab bar at top with `+ New` button. Each analysed ticker becomes a persisted tab. State persisted to localStorage: `echo_modea_tabs_v1`, `echo_modea_active_v1`, `echo_modea_data_{ticker}`. Quick re-search bar appears above each completed analysis with a "Re-run TICKER" button. New search form shows "Recent: AAPL MSFT…" chips for quick navigation. | Each search previously erased the last result; switching tabs erased everything. Now switching to Portfolio and back keeps all in-flight + completed analyses. |
+| 2026-05-31 | WatchlistDashboard persists `openTabs` and `activeView` to localStorage (`echo_open_tabs_v1`, `echo_active_view_v1`). | These were in-memory React state, so switching to Mode A and back wiped open ticker tabs. |
+| 2026-05-31 | Tab X-button isolation: in both WatchlistDashboard and ModeA, the close X is now a sibling button to the nav button (not nested) and only becomes visible + clickable when the tab is active (`text-transparent + pointer-events-none` for inactive). Prevents accidental closes when hover-clicking quickly. | Users were clicking tabs and the X simultaneously, closing tabs they intended to open. |
+| 2026-05-31 | Default watchlist updated: AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA (Magnificent 7). | Aligns with the standard US large-cap monitoring set. |
+| 2026-05-31 | Rebrand: all remaining "FinAgent" / "FinAgent V2" strings replaced with "Echo" — App.tsx sidebar logo, ModeC intro, LLMProvider Orchestrator system prompts, LLMProvider json_schema name. | Final cleanup of the FinAgent → Echo rename. |
 | 2026-05-30 | Default watchlist seeded in WatchlistDashboard: AAPL, MSFT, TSLA, NVDA, COIN, 9988.HK, 1810.HK. Shown when localStorage is empty so new users see a populated dashboard immediately. | Empty dashboard was confusing for first-time users with no context on how to use it. |
 | 2026-05-30 | Two distinct Portfolio refresh modes. Portfolio row refresh button and Refresh All call `POST /api/portfolio-refresh/:ticker` (risk-focused: "risk warning lawsuit regulation" + "bad news negative outlook" + 3 compliance searches). After server response, client calls `CIOAgent.generateInvestmentSignal()` with fresh context and persists new signal. Individual stock Refresh data button calls full `POST /api/refresh/:ticker` (broad news). Refresh All button added to Holdings header: serial loop through all tickers with "Refreshing TICKER…" status. | Portfolio refresh was calling the full analysis endpoint; risk/compliance-only refresh is faster and more appropriate for monitoring. |
 | 2026-05-30 | WatchlistDashboard redesigned as two-view monitoring page. View 1 (Portfolio): 3 summary cards (Total Holdings, Active Alerts, Signals BUY/HOLD/SELL) + holdings table (Ticker, Company, Price, Change, Signal, Alerts, Last Updated). View 2 (Individual stock): 2-col grid with Signal card + Price card (left) and News + Compliance (right), Signal History timeline (bottom), action buttons. Inner tab bar with [ Portfolio ] + per-ticker tabs. Watchlist + module toggles persisted in localStorage. | Provides a monitoring-first view separate from the deep-analysis modes (A/B/C). |
@@ -119,10 +132,15 @@ On timeout the agent emits a status event and returns an empty partial — analy
 - CostAgent: tracks API call costs, estimates token usage and spend
 
 ### StakeholderAgent rules
-- Candidate count is capped at **3 per type** (upstream 3 + downstream 3 + peers 3 = max 9 total).
+- Candidate count is capped at **5 per type** (upstream 5 + downstream 5 + peers 5 = max 15 total).
 - Every candidate LLM returns must include a `ticker` (Yahoo Finance symbol) and `exchange`; private companies without a public ticker are excluded.
-- After LLM output, `resolveTickersForCandidates()` auto-fills missing tickers via `/api/search/:name`.
+- Pipeline after LLM output:
+  1. `resolveTickersForCandidates()` — auto-fills missing tickers via `/api/search/:name`.
+  2. `deduplicateBySymbol()` — collapses duplicates by resolved Yahoo Finance symbol.
+  3. `enrichCandidatesWithYahooData()` — for each ticker, fetches `/api/stock/:t/summary` and overwrites LLM data with verified Yahoo Finance ground truth: `name` ← `price.longName`, `description` ← `assetProfile.longBusinessSummary[:200]`, and (peers only) `sort_value` ← real market cap formatted as `X.XB CUR` / `X.XT CUR`.
 - `top_industries` is deduplicated by industry name — only the most recent period entry is kept.
+- `analyzeManagement()` tries `assetProfile.companyOfficers` first (CEO matched by `title.includes('chief executive' | 'ceo')`, CFO by `'chief financial' | 'cfo'`), falls back to LLM.
+- One-shot data fetch for the UI: `getBrowseData(ticker)` returns `{ topIndustries, candidates, companyIntro }` in a single call.
 - `StakeholderEntity` fields: `name`, `ticker?`, `exchange?`, `type`, `industry`, `description`, `sort_value`, `sort_metric`, `analysis?`.
 
 ### CIOAgent signal stability
@@ -149,39 +167,93 @@ On timeout the agent emits a status event and returns an empty partial — analy
 - `{ticker}` — individual stock tab; Signal card + Price card + News + Compliance + Signal History
 
 **State model:**
-- `watchlist` — persisted in localStorage (`echo_watchlist_v2`); default seeds AAPL MSFT TSLA NVDA COIN 9988.HK 1810.HK if empty
-- `quotes` — Yahoo Finance price data per ticker (React state)
-- `signals` — signal history per ticker from `/api/log/history/:ticker` (React state)
-- `liveData` — webIntel + compliance per ticker (React state, not localStorage reads in render)
+- `watchlist` — persisted in localStorage (`echo_watchlist_v2`); default seeds **Magnificent 7** (AAPL MSFT NVDA GOOGL AMZN META TSLA) if empty
+- `openTabs` — persisted in `echo_open_tabs_v1` (open ticker tabs survive Mode switches)
+- `activeView` — persisted in `echo_active_view_v1` (`'portfolio'` or ticker)
+- `quotes` — Yahoo Finance price + `description` / `sector` / `industry` from `assetProfile`
+- `signals` — signal history per ticker from `/api/log/history/:ticker`
+- `liveData` — webIntel + compliance per ticker (React state; localStorage is a backing cache only, never read in render)
   - Initialised from localStorage on mount via `loadCachedLiveData()`
-  - Updated after every refresh; written back to localStorage via `persistLiveData()`
+  - Updated after every refresh; written back via `persistLiveData()`
+- `settings` — `EchoSettings` persisted in `echo_settings_v1` (auto-refresh + per-data-type freshness intervals)
 
 **Refresh modes:**
 | Mode | Endpoint | Queries | CIOAgent |
 |---|---|---|---|
-| Portfolio row / Refresh All | `POST /api/portfolio-refresh/:ticker` | Risk-focused (warning/lawsuit/regulation + bad news) + 3 compliance | ✅ client-side after |
+| Portfolio row / Refresh All / Auto-refresh | `POST /api/portfolio-refresh/:ticker` | Risk-focused (warning/lawsuit/regulation + bad news) + 3 compliance | ✅ client-side after |
 | Individual stock Refresh data | `POST /api/refresh/:ticker` | Broad news (Reuters/Bloomberg/WSJ + product + analyst) + 3 compliance | ❌ |
 | Full analysis (Mode A/B/C) | Orchestrator pipeline | All agents | ✅ |
 
 **Refresh All:** serial loop — one ticker at a time to avoid Bright Data rate limits.
 
-**localStorage keys:**
+**Auto-refresh:** `setInterval(checkAndRefresh, 60_000)` checks ET hour against `4 PM + settings.delayHours`. Fires `refreshAllTickers()` once per ET calendar day (`echo_last_auto_refresh`).
+
+**Stale badge:** Portfolio table rows compare `liveData[t].refreshedAt` against `settings.intervals.news` — stale rows show amber `AlertCircle` + amber timestamp.
+
+**Stakeholder browse (one-page modal):**
+- Opens via the Stakeholder button on individual stock view.
+- Calls `StakeholderAgent.getBrowseData(ticker)` once on mount.
+- Displays: company intro · top 5 revenue segments · top 5 upstream / downstream / peers.
+- Each entity row with a resolved ticker is clickable → adds to watchlist (if new), fetches data, opens its monitor tab. **No analysis is triggered unless the user clicks Run Full Analysis inside that tab.**
+
+**localStorage keys (full list):**
 - `echo_watchlist_v2` — watchlist items
-- `echo_webintel_{ticker}` — latest WebIntelOutput (written by Orchestrator + refresh endpoints)
-- `echo_compliance_{ticker}` — latest ComplianceOutput (written by Orchestrator + refresh endpoints)
+- `echo_open_tabs_v1`, `echo_active_view_v1` — open tabs / active view (survives mode switches)
+- `echo_webintel_{ticker}`, `echo_compliance_{ticker}` — refresh data cache
+- `echo_settings_v1` — Settings panel state
+- `echo_last_auto_refresh` — ET YYYY-MM-DD, prevents duplicate auto-refresh runs
+- `echo_modea_tabs_v1`, `echo_modea_active_v1`, `echo_modea_data_{ticker}` — Market Analysis tabs
 
 **Server endpoints for Dashboard:**
 - `POST /api/portfolio-refresh/:ticker` — risk-focused news + compliance + Yahoo Finance price
 - `POST /api/refresh/:ticker` — broad news + compliance + Yahoo Finance price
-- `GET /api/log/history/:ticker` — signal history (alias for `/api/log/analysis/:ticker`)
+- `GET  /api/esg/:ticker` — 3 parallel SERP queries (E / S / G) for ESGAgent
+- `GET  /api/log/history/:ticker` — signal history (alias for `/api/log/analysis/:ticker`)
+- `GET  /api/stock/:ticker/summary` — now includes `assetProfile` module (officers, longBusinessSummary)
+
+### Market Analysis tabs (Mode A)
+
+Mirror of Portfolio's tab system, persisted independently:
+- `echo_modea_tabs_v1` — ordered list of open ticker strings
+- `echo_modea_active_v1` — `'new'` (search form) or ticker
+- `echo_modea_data_{ticker}` — full `AnalysisResult` saved on completion
+- New `+ New` button always available; "Recent: AAPL MSFT…" chips appear on the search form when tabs exist
+- Quick-search bar + "Re-run TICKER" button shown above each completed dashboard
+
+### Settings panel
+
+`src/components/SettingsPanel.tsx` — slide-in drawer triggered by the ⚙ button on the inner tab bar. Settings type:
+```ts
+{
+  autoRefresh: {
+    enabled: boolean;
+    delayHours: 1 | 2 | 4 | 8;     // hours after 4 PM ET
+    days: 'weekdays' | 'friday';
+    includeNewsCompliance: boolean;
+    includeSignal: boolean;
+  };
+  intervals: {
+    price:      'off' | '15min' | '1h' | '4h' | 'daily';
+    news:       'off' | 'daily' | 'weekly';
+    compliance: 'off' | 'daily' | 'weekly' | 'monthly';
+    signal:     'off' | 'after_refresh' | 'weekly';
+  };
+}
+```
+
+### AnalysisDashboard layout rules
+
+- `InvestmentSignalBanner` is **always** rendered below the header as a full-width row — never inside the header toolbar.
+- Header is one compact row: company identity left, price chip + 4 icon buttons right.
+- All section visibility can be overridden via `sectionOverrides` prop (used by WatchlistDashboard's module toggles).
 
 ### Agent registry (one-line responsibilities)
 - **FundamentalAgent** — extracts financials, metrics, highlights, risks, and ticker from PDF reports
 - **QuantAgent** — fetches live market price, valuation multiples, and technical trend from Yahoo Finance
 - **PeerAgent** — identifies 3–5 sector-relevant publicly traded competitors; retries once if fewer than 3 returned
-- **ESGAgent** — produces structured E/S/G dimension scores and risk signals from PDF text or LLM knowledge
-- **StakeholderAgent** — maps upstream/downstream/peer entities (top 3 each) with auto-resolved tickers and management info
-- **WebIntelAgent** — fetches live news (3 parallel queries), hiring trend (2-query comparison), regulatory alerts, and competitive signals via Bright Data SERP
+- **ESGAgent** — three-tier data source: Bright Data SERP (`/api/esg/:ticker`, 3 parallel queries) → PDF text extraction → unavailable
+- **StakeholderAgent** — maps upstream/downstream/peer entities (top 5 each) with auto-resolved tickers, enriched via Yahoo Finance `assetProfile` (longName / longBusinessSummary / market cap); management via `companyOfficers`. One-shot UI helper: `getBrowseData(ticker)`
+- **WebIntelAgent** — fetches live news (3 parallel queries), hiring trend (concrete evidence parsing — skips when no specific numbers / phrases found), regulatory alerts, and competitive signals via Bright Data SERP
 - **ComplianceAlertAgent** — runs 3 parallel SERP searches (regulatory / legal / ESG compliance) and classifies urgency
 - **CIOAgent** — synthesises all agent outputs into cross-analysis, valuation opinion, and BUY/HOLD/SELL signal with stability constraint
 - **AuditAgent** — placeholder; reserved for output consistency auditing
