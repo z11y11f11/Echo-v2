@@ -96,7 +96,16 @@ type RefreshStatus = 'idle' | 'refreshing' | 'error';
 
 // ── Persistence helpers ───────────────────────────────────────────────────────
 
-const LS_WATCHLIST = 'echo_watchlist_v2';
+const LS_WATCHLIST   = 'echo_watchlist_v2';
+const LS_OPEN_TABS   = 'echo_open_tabs_v1';
+const LS_ACTIVE_VIEW = 'echo_active_view_v1';
+
+function loadOpenTabs(): string[] {
+  try { return JSON.parse(localStorage.getItem(LS_OPEN_TABS) || '[]'); } catch { return []; }
+}
+function loadActiveView(): string {
+  return localStorage.getItem(LS_ACTIVE_VIEW) || 'portfolio';
+}
 
 const DEFAULT_WATCHLIST: WatchlistItem[] = [
   'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA'
@@ -199,8 +208,8 @@ const Sk = ({ h = 'h-4', w = 'w-full' }: { h?: string; w?: string }) => (
 // onNavigateToAnalysis kept as no-op prop for App.tsx compatibility
 export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { onNavigateToAnalysis: () => void }) {
   const [watchlist, setWatchlist]     = useState<WatchlistItem[]>(loadWatchlist);
-  const [openTabs, setOpenTabs]       = useState<string[]>([]);
-  const [activeView, setActiveView]   = useState<'portfolio' | string>('portfolio');
+  const [openTabs, setOpenTabs]       = useState<string[]>(loadOpenTabs);
+  const [activeView, setActiveView]   = useState<'portfolio' | string>(loadActiveView);
 
   const [quotes,         setQuotes]         = useState<Record<string, StockQuote>>({});
   const [signals,        setSignals]        = useState<Record<string, SignalRecord[]>>({});
@@ -231,9 +240,10 @@ export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { 
 
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Persist watchlist
+  // Persist state across tab switches
   useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
-  // Persist settings
+  useEffect(() => { localStorage.setItem(LS_OPEN_TABS, JSON.stringify(openTabs)); }, [openTabs]);
+  useEffect(() => { localStorage.setItem(LS_ACTIVE_VIEW, activeView); }, [activeView]);
   useEffect(() => { saveSettings(settings); }, [settings]);
   // Focus add input
   useEffect(() => { if (addOpen) setTimeout(() => inputRef.current?.focus(), 50); }, [addOpen]);
