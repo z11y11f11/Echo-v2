@@ -116,6 +116,7 @@ export class OrchestratorAgent {
     if ((result as any).investmentSignal && result.company?.ticker) {
       saveAnalysisLog(result.company.ticker, (result as any).investmentSignal, result.company.name || "");
     }
+    this.persistToLocalStorage(result);
     onEvent({ agent: "Orchestrator", status: "Analysis Complete" });
     return result as AnalysisResult;
   }
@@ -377,6 +378,23 @@ export class OrchestratorAgent {
     return `Returned ${keys.join(", ") || "no structured fields"}`;
   }
 
+  /** Persists webIntel and compliance to localStorage for Dashboard consumption. */
+  private static persistToLocalStorage(result: Partial<AnalysisResult>): void {
+    if (typeof window === "undefined") return;
+    const ticker = result.company?.ticker;
+    if (!ticker) return;
+    try {
+      if ((result as any).webIntel) {
+        localStorage.setItem(`echo_webintel_${ticker}`, JSON.stringify((result as any).webIntel));
+      }
+      if ((result as any).compliance) {
+        localStorage.setItem(`echo_compliance_${ticker}`, JSON.stringify((result as any).compliance));
+      }
+    } catch {
+      // quota exceeded or private browsing — silent
+    }
+  }
+
   private static buildUnavailableCompliance(ticker: string, reason: string) {
     return {
       as_of: new Date().toISOString(),
@@ -573,6 +591,7 @@ export class OrchestratorAgent {
     if ((result as any).investmentSignal && result.company?.ticker) {
       saveAnalysisLog(result.company.ticker, (result as any).investmentSignal, result.company.name || "");
     }
+    this.persistToLocalStorage(result);
     onEvent({ agent: "Orchestrator", status: "Analysis Complete" });
     return result as AnalysisResult;
   }

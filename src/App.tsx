@@ -142,7 +142,7 @@ export default function App() {
             transition={{ duration: 0.12 }}
             className="flex-1 flex flex-col overflow-hidden"
           >
-            {mode === 'D' && <WatchlistDashboard />}
+            {mode === 'D' && <WatchlistDashboard onNavigateToAnalysis={() => setMode('A')} />}
             {mode === 'A' && <ModeA />}
             {mode === 'B' && <ModeB />}
             {mode === 'C' && <ModeC />}

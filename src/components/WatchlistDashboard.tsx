@@ -1,472 +1,844 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+/**
+ * WatchlistDashboard — two-view monitoring page.
+ *
+ * View 1 (Portfolio Overview):  summary cards + holdings table
+ * View 2 (Individual Stock):    signal card + price card + news + compliance + history
+ *
+ * Data sources:
+ *   - Signal / history : GET /api/log/history/:ticker
+ *   - Market price     : GET /api/stock/:ticker
+ *   - News / compliance: localStorage  echo_webintel_{ticker} / echo_compliance_{ticker}
+ *     (written by Orchestrator after each full analysis)
+ */
+
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  Plus, X, RefreshCw, LayoutDashboard, TrendingUp, TrendingDown,
-  Minus, Loader2, Check, ChevronRight, Clock, Bot,
-  BarChart3, Globe, ShieldAlert, Sprout, Users, History, Activity
+  Plus, X, RefreshCw, TrendingUp, TrendingDown, Minus,
+  AlertTriangle, CheckCircle2, Clock, ChevronRight,
+  BarChart3, ExternalLink, Loader2, ShieldAlert, Globe,
+  History, Zap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { runMasterAnalysis } from '../services/ai';
-import type { AgentEvent } from '../services/ai';
-import AnalysisDashboard from './AnalysisDashboard';
-import StakeholderModal from './StakeholderModal';
-import type { AnalysisResult, InvestmentSignal } from '../types';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface WatchlistItem {
-  ticker: string;
-  addedAt: string;
+interface WatchlistItem { ticker: string; addedAt: string; }
+
+interface StockQuote {
+  regularMarketPrice?: number;
+  regularMarketChangePercent?: number;
+  currency?: string;
+  longName?: string;
+  shortName?: string;
+  marketCap?: number;
+  trailingPE?: number;
 }
 
-interface CachedAnalysis {
-  data: Partial<AnalysisResult>;
-  analyzedAt: string; // ISO
+interface SignalRecord {
+  verdict: 'BUY' | 'HOLD' | 'SELL';
+  confidence: 'high' | 'medium' | 'low';
+  key_reasons: string[];
+  risk_warnings: string[];
+  generated_at: string;
+  created_at: string;
 }
 
-type ModuleKey = 'metrics' | 'webIntel' | 'compliance' | 'esg' | 'competitors' | 'signalHistory' | 'stakeholder';
+interface NewsSignal {
+  title: string;
+  url: string;
+  snippet: string;
+  date: string | null;
+  sentiment: 'positive' | 'negative' | 'neutral';
+}
 
-const MODULE_META: Record<ModuleKey, { label: string; icon: React.ReactNode; description: string }> = {
-  metrics:       { label: 'Financial Analysis',     icon: <BarChart3 className="w-3.5 h-3.5" />,   description: 'KPIs, valuation models, summary' },
-  webIntel:      { label: 'Live Web Intelligence',  icon: <Globe className="w-3.5 h-3.5" />,        description: 'News, hiring, competitive signals' },
-  compliance:    { label: 'Compliance Alerts',      icon: <ShieldAlert className="w-3.5 h-3.5" />,  description: 'Regulatory, legal, ESG compliance' },
-  esg:           { label: 'ESG Profile',            icon: <Sprout className="w-3.5 h-3.5" />,       description: 'Environmental, Social, Governance' },
-  competitors:   { label: 'Peer Comparison',        icon: <Users className="w-3.5 h-3.5" />,        description: 'Sector peers KPI comparison' },
-  signalHistory: { label: 'Signal History',         icon: <History className="w-3.5 h-3.5" />,      description: 'Past BUY/HOLD/SELL signals' },
-  stakeholder:   { label: 'Stakeholder Analysis',   icon: <Activity className="w-3.5 h-3.5" />,     description: 'Supply chain & management (on demand)' },
-};
+interface ComplianceAlert {
+  summary: string;
+  source: string;
+  urgency: 'high' | 'medium' | 'low';
+  date: string | null;
+  category: string;
+}
 
-const ALL_MODULE_KEYS: ModuleKey[] = ['metrics', 'webIntel', 'compliance', 'esg', 'competitors', 'signalHistory', 'stakeholder'];
+interface WebIntelCache {
+  news_signals?: NewsSignal[];
+  data_gaps?: string[];
+}
 
-const STORAGE_KEY_WATCHLIST = 'echo_watchlist_v1';
-const STORAGE_KEY_MODULES   = 'echo_modules_v1';
+interface ComplianceCache {
+  alerts?: ComplianceAlert[];
+  overall_risk?: string;
+  data_gaps?: string[];
+}
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const LS_WATCHLIST = 'echo_watchlist_v2';
 
 function loadWatchlist(): WatchlistItem[] {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY_WATCHLIST) || '[]'); } catch { return []; }
+  try { return JSON.parse(localStorage.getItem(LS_WATCHLIST) || '[]'); } catch { return []; }
 }
 function saveWatchlist(items: WatchlistItem[]) {
-  localStorage.setItem(STORAGE_KEY_WATCHLIST, JSON.stringify(items));
+  localStorage.setItem(LS_WATCHLIST, JSON.stringify(items));
 }
-function loadEnabledModules(): Set<ModuleKey> {
-  try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY_MODULES) || 'null');
-    if (Array.isArray(raw)) return new Set(raw as ModuleKey[]);
-  } catch {}
-  // default: all except stakeholder enabled
-  return new Set<ModuleKey>(['metrics', 'webIntel', 'compliance', 'esg', 'competitors', 'signalHistory']);
+function readWebIntel(ticker: string): WebIntelCache | null {
+  try { return JSON.parse(localStorage.getItem(`echo_webintel_${ticker}`) || 'null'); } catch { return null; }
 }
-function saveEnabledModules(mods: Set<ModuleKey>) {
-  localStorage.setItem(STORAGE_KEY_MODULES, JSON.stringify([...mods]));
+function readCompliance(ticker: string): ComplianceCache | null {
+  try { return JSON.parse(localStorage.getItem(`echo_compliance_${ticker}`) || 'null'); } catch { return null; }
 }
 
-function mergePartial(acc: Partial<AnalysisResult>, incoming: Partial<AnalysisResult>): Partial<AnalysisResult> {
-  const merged = { ...acc, ...incoming };
-  if (acc.metrics && incoming.metrics) {
-    const seen = new Set(acc.metrics.map(m => m.label));
-    merged.metrics = [...acc.metrics, ...incoming.metrics.filter(m => !seen.has(m.label))];
-  }
-  if (acc.highlights && incoming.highlights) {
-    const seen = new Set(acc.highlights);
-    merged.highlights = [...acc.highlights, ...incoming.highlights.filter(h => !seen.has(h))];
-  }
-  if (acc.risks && incoming.risks) {
-    const seen = new Set(acc.risks);
-    merged.risks = [...acc.risks, ...incoming.risks.filter(r => !seen.has(r))];
-  }
-  return merged;
+// ── Style helpers ─────────────────────────────────────────────────────────────
+
+function verdictStyle(v?: string) {
+  if (v === 'BUY')  return { badge: 'bg-emerald-950/60 text-emerald-300 border-emerald-500/40', dot: 'bg-emerald-400', text: 'text-emerald-300' };
+  if (v === 'SELL') return { badge: 'bg-rose-950/60 text-rose-300 border-rose-500/40',          dot: 'bg-rose-400',    text: 'text-rose-300' };
+  return              { badge: 'bg-amber-950/60 text-amber-300 border-amber-500/40',              dot: 'bg-amber-400',   text: 'text-amber-300' };
 }
 
-function relativeTime(iso: string): string {
+function confidenceStyle(c?: string) {
+  if (c === 'high')   return 'text-emerald-400';
+  if (c === 'medium') return 'text-amber-400';
+  return 'text-slate-400';
+}
+
+function urgencyStyle(u?: string) {
+  if (u === 'high')   return 'bg-rose-950/40 text-rose-400 border-rose-500/30';
+  if (u === 'medium') return 'bg-amber-950/40 text-amber-400 border-amber-500/30';
+  return 'bg-slate-800/50 text-slate-400 border-slate-700';
+}
+
+function sentimentStyle(s?: string) {
+  if (s === 'positive') return 'bg-emerald-950/40 text-emerald-400 border-emerald-500/30';
+  if (s === 'negative') return 'bg-rose-950/40 text-rose-400 border-rose-500/30';
+  return 'bg-slate-800/50 text-slate-400 border-slate-700';
+}
+
+function relTime(iso?: string): string {
+  if (!iso) return '—';
   const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
-function verdictColor(v?: string) {
-  if (v === 'BUY')  return { badge: 'bg-emerald-950/60 text-emerald-300 border-emerald-500/40', dot: 'bg-emerald-400' };
-  if (v === 'SELL') return { badge: 'bg-rose-950/60 text-rose-300 border-rose-500/40',          dot: 'bg-rose-400' };
-  return             { badge: 'bg-amber-950/60 text-amber-300 border-amber-500/40',              dot: 'bg-amber-400' };
+function fmtPrice(price?: number, currency?: string): string {
+  if (!price) return '—';
+  const sym = currency === 'USD' ? '$' : (currency || '');
+  const val = currency === 'KRW' || currency === 'JPY'
+    ? Math.round(price).toLocaleString()
+    : price.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return `${sym}${val}`;
 }
+
+function fmtChange(pct?: number): { text: string; cls: string } {
+  if (pct === undefined || pct === null) return { text: '—', cls: 'text-slate-500' };
+  const sign = pct >= 0 ? '+' : '';
+  return { text: `${sign}${pct.toFixed(2)}%`, cls: pct >= 0 ? 'text-emerald-400' : 'text-rose-400' };
+}
+
+function fmtMktCap(v?: number, currency?: string): string {
+  if (!v) return '—';
+  const cur = currency ? ` ${currency}` : '';
+  if (v >= 1e12) return `${(v / 1e12).toFixed(1)}T${cur}`;
+  if (v >= 1e9)  return `${(v / 1e9).toFixed(1)}B${cur}`;
+  if (v >= 1e6)  return `${(v / 1e6).toFixed(1)}M${cur}`;
+  return `${v.toLocaleString()}${cur}`;
+}
+
+// ── Skeleton ──────────────────────────────────────────────────────────────────
+
+const Skeleton = ({ h = 'h-4', w = 'w-full' }: { h?: string; w?: string }) => (
+  <div className={`${h} ${w} bg-slate-800 rounded animate-pulse`} />
+);
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function WatchlistDashboard() {
-  const [watchlist, setWatchlist] = useState<WatchlistItem[]>(loadWatchlist);
-  const [activeTicker, setActiveTicker] = useState<string | null>(null);
-  const [cache, setCache] = useState<Record<string, CachedAnalysis>>({});
-  const [analyzing, setAnalyzing] = useState<Record<string, boolean>>({});
-  const [agentStatus, setAgentStatus] = useState<string>('');
-  const [enabledModules, setEnabledModules] = useState<Set<ModuleKey>>(loadEnabledModules);
-  const [addInput, setAddInput] = useState('');
-  const [showAddInput, setShowAddInput] = useState(false);
-  const [addError, setAddError] = useState('');
-  const [stakeholderTicker, setStakeholderTicker] = useState<string | null>(null);
+interface Props {
+  onNavigateToAnalysis: () => void;
+}
 
+export default function WatchlistDashboard({ onNavigateToAnalysis }: Props) {
+  // watchlist + tabs state
+  const [watchlist, setWatchlist]     = useState<WatchlistItem[]>(loadWatchlist);
+  const [openTabs, setOpenTabs]       = useState<string[]>([]);   // tickers with individual tabs open
+  const [activeView, setActiveView]   = useState<'portfolio' | string>('portfolio');
+
+  // per-ticker data
+  const [quotes,   setQuotes]   = useState<Record<string, StockQuote>>({});
+  const [signals,  setSignals]  = useState<Record<string, SignalRecord[]>>({});
+  const [loadingTickers, setLoadingTickers] = useState<Set<string>>(new Set());
+
+  // add-ticker UI
+  const [addInput, setAddInput]   = useState('');
+  const [addOpen,  setAddOpen]    = useState(false);
+  const [addError, setAddError]   = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Persist watchlist + modules
+  // persist watchlist
   useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
-  useEffect(() => { saveEnabledModules(enabledModules); }, [enabledModules]);
 
-  // Auto-focus add input
-  useEffect(() => { if (showAddInput) setTimeout(() => inputRef.current?.focus(), 60); }, [showAddInput]);
+  // auto-focus add input
+  useEffect(() => { if (addOpen) setTimeout(() => inputRef.current?.focus(), 50); }, [addOpen]);
 
-  // ── Analysis ────────────────────────────────────────────────────────────────
+  // ── Data fetching ───────────────────────────────────────────────────────────
 
-  const analyze = useCallback(async (ticker: string) => {
-    if (analyzing[ticker]) return;
-    setAnalyzing(prev => ({ ...prev, [ticker]: true }));
-    setAgentStatus('Initializing...');
-
-    // Clear stale cache for this ticker so sections update
-    setCache(prev => {
-      const next = { ...prev };
-      delete next[ticker];
-      return next;
-    });
-
-    let partial: Partial<AnalysisResult> = {};
+  const fetchTickerData = useCallback(async (ticker: string) => {
+    setLoadingTickers(prev => new Set(prev).add(ticker));
     try {
-      const final = await runMasterAnalysis(
-        { ticker, options: ['highlights', 'risks', 'esg', 'competitors'] },
-        (evt: AgentEvent) => {
-          setAgentStatus(`${evt.agent}: ${evt.status}`);
-          if (evt.partial) {
-            partial = mergePartial(partial, evt.partial);
-            setCache(prev => ({
-              ...prev,
-              [ticker]: { data: partial, analyzedAt: new Date().toISOString() }
-            }));
+      const [quoteRes, histRes] = await Promise.allSettled([
+        fetch(`/api/stock/${encodeURIComponent(ticker)}`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/log/history/${encodeURIComponent(ticker)}`).then(r => r.ok ? r.json() : []),
+      ]);
+
+      if (quoteRes.status === 'fulfilled' && quoteRes.value) {
+        const q = quoteRes.value;
+        setQuotes(prev => ({
+          ...prev,
+          [ticker]: {
+            regularMarketPrice:         q.regularMarketPrice,
+            regularMarketChangePercent: q.regularMarketChangePercent,
+            currency:                   q.currency,
+            longName:                   q.longName || q.shortName,
+            marketCap:                  q.marketCap,
+            trailingPE:                 q.trailingPE,
           }
-        }
-      );
-      setCache(prev => ({
-        ...prev,
-        [ticker]: { data: final, analyzedAt: new Date().toISOString() }
-      }));
-    } catch (e: any) {
-      setAgentStatus(`Failed: ${e.message}`);
+        }));
+      }
+      if (histRes.status === 'fulfilled' && Array.isArray(histRes.value)) {
+        setSignals(prev => ({ ...prev, [ticker]: histRes.value }));
+      }
     } finally {
-      setAnalyzing(prev => ({ ...prev, [ticker]: false }));
-      setAgentStatus('');
+      setLoadingTickers(prev => { const n = new Set(prev); n.delete(ticker); return n; });
     }
-  }, [analyzing]);
+  }, []);
 
-  // Auto-analyze when ticker selected and not yet in cache
+  // fetch all tickers on mount, then individual on add
   useEffect(() => {
-    if (activeTicker && !cache[activeTicker] && !analyzing[activeTicker]) {
-      analyze(activeTicker);
-    }
-  }, [activeTicker]);
+    watchlist.forEach(w => fetchTickerData(w.ticker));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Watchlist management ─────────────────────────────────────────────────────
+  // ── Watchlist management ────────────────────────────────────────────────────
 
   const addTicker = () => {
     const t = addInput.trim().toUpperCase();
     if (!t) return;
-    if (/\s/.test(t) || t.length > 20) { setAddError('Invalid ticker format'); return; }
+    if (/\s/.test(t) || t.length > 20) { setAddError('Invalid ticker'); return; }
     if (watchlist.some(w => w.ticker === t)) { setAddError('Already in watchlist'); return; }
-    const next = [...watchlist, { ticker: t, addedAt: new Date().toISOString() }];
-    setWatchlist(next);
-    setActiveTicker(t);
-    setAddInput('');
-    setAddError('');
-    setShowAddInput(false);
+    setWatchlist(prev => [...prev, { ticker: t, addedAt: new Date().toISOString() }]);
+    fetchTickerData(t);
+    setAddInput(''); setAddError(''); setAddOpen(false);
   };
 
   const removeTicker = (ticker: string) => {
     setWatchlist(prev => prev.filter(w => w.ticker !== ticker));
-    if (activeTicker === ticker) setActiveTicker(watchlist.find(w => w.ticker !== ticker)?.ticker ?? null);
-    setCache(prev => { const n = { ...prev }; delete n[ticker]; return n; });
+    setOpenTabs(prev => prev.filter(t => t !== ticker));
+    if (activeView === ticker) setActiveView('portfolio');
+    setQuotes(prev => { const n = {...prev}; delete n[ticker]; return n; });
+    setSignals(prev => { const n = {...prev}; delete n[ticker]; return n; });
   };
 
-  // ── Module toggles ───────────────────────────────────────────────────────────
-
-  const toggleModule = (key: ModuleKey) => {
-    setEnabledModules(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
+  const openStockTab = (ticker: string) => {
+    if (!openTabs.includes(ticker)) setOpenTabs(prev => [...prev, ticker]);
+    setActiveView(ticker);
   };
 
-  // Build sectionOverrides for AnalysisDashboard from enabled modules
-  const sectionOverrides: Record<string, boolean> = {
-    metrics:      enabledModules.has('metrics'),
-    valuation:    enabledModules.has('metrics'),
-    summary:      enabledModules.has('metrics'),
-    insights:     enabledModules.has('metrics'),
-    history:      enabledModules.has('metrics'),
-    webIntel:     enabledModules.has('webIntel'),
-    compliance:   enabledModules.has('compliance'),
-    esg:          enabledModules.has('esg'),
-    competitors:  enabledModules.has('competitors'),
-    signalHistory:enabledModules.has('signalHistory'),
-    stakeholder:  enabledModules.has('stakeholder'),
+  const closeStockTab = (ticker: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setOpenTabs(prev => prev.filter(t => t !== ticker));
+    if (activeView === ticker) setActiveView('portfolio');
   };
 
-  const activeCache = activeTicker ? cache[activeTicker] : null;
-  const isActive    = activeTicker ? !!analyzing[activeTicker] : false;
+  // ── Computed summaries for portfolio header ─────────────────────────────────
+
+  const totalHoldings = watchlist.length;
+  const signalCounts = { BUY: 0, HOLD: 0, SELL: 0 };
+  let activeAlerts = 0;
+  watchlist.forEach(w => {
+    const latest = signals[w.ticker]?.[0];
+    if (latest?.verdict) signalCounts[latest.verdict]++;
+    const comp = readCompliance(w.ticker);
+    activeAlerts += comp?.alerts?.filter(a => a.urgency === 'high').length ?? 0;
+  });
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex-1 flex flex-col overflow-hidden bg-[#02040a]">
 
-      {/* ── Left sidebar ──────────────────────────────────────────────────── */}
-      <aside className="w-56 shrink-0 border-r border-slate-800/60 bg-[#080a0f] flex flex-col overflow-hidden">
-        <div className="p-4 border-b border-slate-800/60">
-          <div className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">
-            <LayoutDashboard className="w-3.5 h-3.5 text-blue-400" />
-            Watchlist
+      {/* ── Inner tab bar ───────────────────────────────────────────────── */}
+      <div className="shrink-0 flex items-center gap-1 px-4 h-10 border-b border-slate-800/60 bg-[#080a0f]/80 overflow-x-auto">
+        {/* Portfolio tab */}
+        <button
+          onClick={() => setActiveView('portfolio')}
+          className={`shrink-0 px-3 py-1 rounded-md text-xs font-bold transition-colors ${
+            activeView === 'portfolio'
+              ? 'bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20'
+              : 'text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          Portfolio
+        </button>
+
+        {/* Individual ticker tabs */}
+        {openTabs.map(ticker => (
+          <button
+            key={ticker}
+            onClick={() => setActiveView(ticker)}
+            className={`shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-colors group ${
+              activeView === ticker
+                ? 'bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/20'
+                : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            <span className="font-mono">{ticker}</span>
+            <X
+              className="w-3 h-3 opacity-50 group-hover:opacity-100 hover:text-rose-400 transition-colors"
+              onClick={e => closeStockTab(ticker, e)}
+            />
+          </button>
+        ))}
+      </div>
+
+      {/* ── Content ─────────────────────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto">
+        <AnimatePresence mode="wait">
+          {activeView === 'portfolio' ? (
+            <motion.div key="portfolio" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.1 }}>
+              <PortfolioView
+                watchlist={watchlist}
+                quotes={quotes}
+                signals={signals}
+                loadingTickers={loadingTickers}
+                signalCounts={signalCounts}
+                totalHoldings={totalHoldings}
+                activeAlerts={activeAlerts}
+                addInput={addInput}
+                setAddInput={setAddInput}
+                addOpen={addOpen}
+                setAddOpen={setAddOpen}
+                addError={addError}
+                setAddError={setAddError}
+                inputRef={inputRef}
+                onAddTicker={addTicker}
+                onRemoveTicker={removeTicker}
+                onSelectTicker={openStockTab}
+                onRefresh={fetchTickerData}
+              />
+            </motion.div>
+          ) : (
+            <motion.div key={activeView} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.1 }}>
+              <IndividualStockView
+                ticker={activeView}
+                quote={quotes[activeView]}
+                signalHistory={signals[activeView] || []}
+                loading={loadingTickers.has(activeView)}
+                onNavigateToAnalysis={onNavigateToAnalysis}
+                onRefresh={() => fetchTickerData(activeView)}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}
+
+// ── Portfolio view ────────────────────────────────────────────────────────────
+
+interface PortfolioViewProps {
+  watchlist: WatchlistItem[];
+  quotes: Record<string, StockQuote>;
+  signals: Record<string, SignalRecord[]>;
+  loadingTickers: Set<string>;
+  signalCounts: Record<string, number>;
+  totalHoldings: number;
+  activeAlerts: number;
+  addInput: string;
+  setAddInput: (v: string) => void;
+  addOpen: boolean;
+  setAddOpen: (v: boolean) => void;
+  addError: string;
+  setAddError: (v: string) => void;
+  inputRef: React.RefObject<HTMLInputElement>;
+  onAddTicker: () => void;
+  onRemoveTicker: (t: string) => void;
+  onSelectTicker: (t: string) => void;
+  onRefresh: (t: string) => void;
+}
+
+function PortfolioView({
+  watchlist, quotes, signals, loadingTickers,
+  signalCounts, totalHoldings, activeAlerts,
+  addInput, setAddInput, addOpen, setAddOpen, addError, setAddError,
+  inputRef, onAddTicker, onRemoveTicker, onSelectTicker, onRefresh,
+}: PortfolioViewProps) {
+  return (
+    <div className="max-w-6xl mx-auto p-6 space-y-6">
+
+      {/* ── Summary cards ─────────────────────────────────────────────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <SummaryCard
+          label="Total Holdings"
+          value={String(totalHoldings)}
+          sub="tracked tickers"
+          accent="text-blue-400"
+        />
+        <SummaryCard
+          label="Active Alerts"
+          value={activeAlerts > 0 ? String(activeAlerts) : '—'}
+          sub="high urgency compliance"
+          accent={activeAlerts > 0 ? 'text-rose-400' : 'text-slate-500'}
+          valueClass={activeAlerts > 0 ? 'text-rose-400' : undefined}
+        />
+        <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Signals</div>
+          <div className="flex items-center gap-3">
+            <span className="text-sm font-black text-emerald-400">BUY {signalCounts.BUY}</span>
+            <span className="text-slate-700">·</span>
+            <span className="text-sm font-black text-amber-400">HOLD {signalCounts.HOLD}</span>
+            <span className="text-slate-700">·</span>
+            <span className="text-sm font-black text-rose-400">SELL {signalCounts.SELL}</span>
           </div>
+          <div className="text-[10px] text-slate-600 mt-1">from latest signals</div>
+        </div>
+      </div>
 
-          {/* Watchlist items */}
-          <div className="space-y-1">
-            {watchlist.length === 0 && (
-              <p className="text-xs text-slate-600 italic px-1">No tickers yet</p>
-            )}
-            {watchlist.map(item => {
-              const signal = cache[item.ticker]?.data?.investmentSignal;
-              const isRunning = !!analyzing[item.ticker];
-              const isSelected = activeTicker === item.ticker;
-              const vc = verdictColor(signal?.verdict);
+      {/* ── Holdings table ─────────────────────────────────────────────── */}
+      <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl overflow-hidden">
+        <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+          <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Holdings</span>
+          {watchlist.length > 0 && (
+            <span className="text-[10px] text-slate-600">{watchlist.length} ticker{watchlist.length !== 1 ? 's' : ''}</span>
+          )}
+        </div>
 
-              return (
-                <div
-                  key={item.ticker}
-                  className={`group flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${
-                    isSelected
-                      ? 'bg-blue-500/10 border border-blue-500/20 text-white'
-                      : 'hover:bg-slate-800/50 text-slate-300 border border-transparent'
-                  }`}
-                  onClick={() => setActiveTicker(item.ticker)}
-                >
-                  {/* Verdict dot */}
-                  <div className={`w-2 h-2 rounded-full shrink-0 ${
-                    isRunning ? 'bg-blue-400 animate-pulse' : (signal ? vc.dot : 'bg-slate-600')
-                  }`} />
-
-                  <span className="flex-1 text-sm font-bold font-mono truncate">{item.ticker}</span>
-
-                  {/* Verdict badge */}
-                  {signal && !isRunning && (
-                    <span className={`text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border ${vc.badge}`}>
-                      {signal.verdict}
-                    </span>
-                  )}
-                  {isRunning && <Loader2 className="w-3 h-3 text-blue-400 animate-spin shrink-0" />}
-
-                  {/* Remove button */}
-                  <button
-                    onClick={e => { e.stopPropagation(); removeTicker(item.ticker); }}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity text-slate-600 hover:text-rose-400 shrink-0"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              );
-            })}
+        {watchlist.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <p className="text-slate-500 text-sm">No tickers in watchlist yet.</p>
+            <p className="text-slate-600 text-xs mt-1">Add a ticker below to start monitoring.</p>
           </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-[#0a0d14] border-b border-slate-800/80">
+                <tr className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                  <th className="px-5 py-3 text-left">Ticker</th>
+                  <th className="px-5 py-3 text-left">Company</th>
+                  <th className="px-5 py-3 text-right">Price</th>
+                  <th className="px-5 py-3 text-right">Change</th>
+                  <th className="px-5 py-3 text-center">Signal</th>
+                  <th className="px-5 py-3 text-center">Alerts</th>
+                  <th className="px-5 py-3 text-right">Last Updated</th>
+                  <th className="px-3 py-3" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50">
+                {watchlist.map(item => {
+                  const q = quotes[item.ticker];
+                  const hist = signals[item.ticker];
+                  const latest = hist?.[0];
+                  const comp = readCompliance(item.ticker);
+                  const highAlerts = comp?.alerts?.filter(a => a.urgency === 'high').length ?? 0;
+                  const isLoading = loadingTickers.has(item.ticker);
+                  const change = fmtChange(q?.regularMarketChangePercent);
+                  const vc = verdictStyle(latest?.verdict);
 
-          {/* Add ticker */}
-          {showAddInput ? (
-            <div className="mt-3">
+                  return (
+                    <tr
+                      key={item.ticker}
+                      onClick={() => onSelectTicker(item.ticker)}
+                      className="hover:bg-slate-800/30 cursor-pointer transition-colors group"
+                    >
+                      <td className="px-5 py-3.5">
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full shrink-0 ${isLoading ? 'bg-blue-400 animate-pulse' : (latest ? vc.dot : 'bg-slate-600')}`} />
+                          <span className="font-bold font-mono text-white">{item.ticker}</span>
+                        </div>
+                      </td>
+                      <td className="px-5 py-3.5">
+                        {isLoading ? <Skeleton w="w-32" /> : (
+                          <span className="text-slate-300 truncate max-w-[180px] block">{q?.longName || '—'}</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5 text-right font-mono">
+                        {isLoading ? <Skeleton w="w-16" /> : (
+                          <span className="text-white">{fmtPrice(q?.regularMarketPrice, q?.currency)}</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5 text-right font-mono">
+                        {isLoading ? <Skeleton w="w-14" /> : (
+                          <span className={`flex items-center justify-end gap-1 font-bold ${change.cls}`}>
+                            {q?.regularMarketChangePercent !== undefined && (
+                              q.regularMarketChangePercent >= 0
+                                ? <TrendingUp className="w-3 h-3" />
+                                : <TrendingDown className="w-3 h-3" />
+                            )}
+                            {change.text}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5 text-center">
+                        {isLoading ? <Skeleton w="w-12 mx-auto" /> : latest ? (
+                          <span className={`inline-block px-2 py-0.5 rounded border text-[10px] font-black uppercase tracking-widest ${vc.badge}`}>
+                            {latest.verdict}
+                          </span>
+                        ) : <span className="text-slate-600 text-xs">—</span>}
+                      </td>
+                      <td className="px-5 py-3.5 text-center">
+                        {highAlerts > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-rose-400 font-bold text-xs">
+                            <AlertTriangle className="w-3 h-3" />{highAlerts}
+                          </span>
+                        ) : <span className="text-slate-600 text-xs">—</span>}
+                      </td>
+                      <td className="px-5 py-3.5 text-right">
+                        <span className="text-[11px] text-slate-500 flex items-center justify-end gap-1">
+                          <Clock className="w-3 h-3" />
+                          {relTime(latest?.created_at || latest?.generated_at)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3.5">
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={e => { e.stopPropagation(); onRefresh(item.ticker); }}
+                            className="p-1.5 rounded-lg hover:bg-slate-700/50 text-slate-500 hover:text-slate-300 transition-colors"
+                            title="Refresh"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={e => { e.stopPropagation(); onRemoveTicker(item.ticker); }}
+                            className="p-1.5 rounded-lg hover:bg-rose-950/30 text-slate-500 hover:text-rose-400 transition-colors"
+                            title="Remove"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* ── Add ticker ─────────────────────────────────────────────────── */}
+        <div className="px-5 py-4 border-t border-slate-800/60">
+          {addOpen ? (
+            <div className="flex items-center gap-2">
               <input
                 ref={inputRef}
                 value={addInput}
                 onChange={e => { setAddInput(e.target.value.toUpperCase()); setAddError(''); }}
-                onKeyDown={e => { if (e.key === 'Enter') addTicker(); if (e.key === 'Escape') { setShowAddInput(false); setAddInput(''); setAddError(''); } }}
-                placeholder="e.g. AAPL"
-                className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-white placeholder-slate-600 focus:outline-none focus:border-blue-500/50"
+                onKeyDown={e => { if (e.key === 'Enter') onAddTicker(); if (e.key === 'Escape') { setAddOpen(false); setAddInput(''); setAddError(''); } }}
+                placeholder="Enter ticker (e.g. AAPL)"
+                className="w-48 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-white placeholder-slate-600 focus:outline-none focus:border-blue-500/50"
               />
-              {addError && <p className="text-[10px] text-rose-400 mt-1 px-1">{addError}</p>}
-              <div className="flex gap-1.5 mt-1.5">
-                <button
-                  onClick={addTicker}
-                  className="flex-1 flex items-center justify-center gap-1 py-1 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold rounded-lg transition-colors"
-                >
-                  <Check className="w-3 h-3" /> Add
-                </button>
-                <button
-                  onClick={() => { setShowAddInput(false); setAddInput(''); setAddError(''); }}
-                  className="px-2 py-1 border border-slate-700 text-slate-400 hover:text-white text-[10px] rounded-lg transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
+              <button
+                onClick={onAddTicker}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors"
+              >
+                Add
+              </button>
+              <button
+                onClick={() => { setAddOpen(false); setAddInput(''); setAddError(''); }}
+                className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-white text-xs rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              {addError && <span className="text-[10px] text-rose-400">{addError}</span>}
             </div>
           ) : (
             <button
-              onClick={() => setShowAddInput(true)}
-              className="mt-3 w-full flex items-center gap-2 px-2.5 py-2 rounded-lg border border-dashed border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-600 transition-colors text-xs font-bold"
+              onClick={() => setAddOpen(true)}
+              className="flex items-center gap-2 text-xs font-bold text-slate-500 hover:text-slate-300 transition-colors"
             >
-              <Plus className="w-3.5 h-3.5" /> Add ticker
+              <Plus className="w-4 h-4" /> Add Ticker
             </button>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
 
-        {/* Module toggles */}
-        <div className="p-4 flex-1 overflow-y-auto">
-          <div className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3">Modules</div>
-          <div className="space-y-1">
-            {ALL_MODULE_KEYS.map(key => {
-              const meta = MODULE_META[key];
-              const enabled = enabledModules.has(key);
-              const isSpecial = key === 'stakeholder';
-              return (
-                <button
-                  key={key}
-                  onClick={() => toggleModule(key)}
-                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-colors group ${
-                    enabled
-                      ? 'text-slate-300 hover:bg-slate-800/40'
-                      : 'text-slate-600 hover:text-slate-400'
-                  }`}
-                  title={meta.description}
-                >
-                  <div className={`w-3.5 h-3.5 rounded border shrink-0 flex items-center justify-center transition-colors ${
-                    enabled ? 'bg-blue-600 border-blue-500' : 'border-slate-700'
-                  }`}>
-                    {enabled && <Check className="w-2.5 h-2.5 text-white" />}
-                  </div>
-                  <span className="flex items-center gap-1.5 text-[11px] font-medium truncate">
-                    {meta.icon}
-                    {meta.label}
-                    {isSpecial && <span className="text-[9px] text-slate-600 font-normal shrink-0">on demand</span>}
-                  </span>
-                </button>
-              );
-            })}
+// ── Individual stock view ─────────────────────────────────────────────────────
+
+interface IndividualStockViewProps {
+  ticker: string;
+  quote?: StockQuote;
+  signalHistory: SignalRecord[];
+  loading: boolean;
+  onNavigateToAnalysis: () => void;
+  onRefresh: () => void;
+}
+
+function IndividualStockView({
+  ticker, quote, signalHistory, loading, onNavigateToAnalysis, onRefresh
+}: IndividualStockViewProps) {
+  const latest = signalHistory[0];
+  const webIntel = readWebIntel(ticker);
+  const compliance = readCompliance(ticker);
+  const vc = verdictStyle(latest?.verdict);
+  const change = fmtChange(quote?.regularMarketChangePercent);
+
+  return (
+    <div className="max-w-6xl mx-auto p-6 space-y-5">
+
+      {/* ── Ticker header ─────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <div className="flex items-center gap-3">
+            <span className="text-2xl font-black font-mono text-white">{ticker}</span>
+            {loading && <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />}
           </div>
+          {quote?.longName && <p className="text-sm text-slate-400 mt-0.5">{quote.longName}</p>}
         </div>
-      </aside>
-
-      {/* ── Main area ──────────────────────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-
-        {/* Top bar */}
-        <div className="shrink-0 h-12 border-b border-slate-800/60 bg-[#080a0f]/60 backdrop-blur-sm flex items-center px-4 gap-3">
-          {activeTicker ? (
-            <>
-              <span className="text-sm font-bold font-mono text-white">{activeTicker}</span>
-              {activeCache?.data?.company?.name && (
-                <span className="text-xs text-slate-500 truncate max-w-[200px]">{activeCache.data.company.name}</span>
-              )}
-              {isActive && (
-                <span className="flex items-center gap-1.5 text-[10px] text-blue-400 font-bold ml-2">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  {agentStatus || 'Running agents…'}
-                </span>
-              )}
-              <div className="ml-auto flex items-center gap-2">
-                {activeCache && (
-                  <span className="text-[10px] text-slate-600 flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    Updated {relativeTime(activeCache.analyzedAt)}
-                  </span>
-                )}
-                <button
-                  onClick={() => activeTicker && analyze(activeTicker)}
-                  disabled={isActive}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900 text-xs font-bold text-slate-300 hover:text-white hover:border-blue-500/50 transition-colors disabled:opacity-40"
-                >
-                  <RefreshCw className={`w-3 h-3 ${isActive ? 'animate-spin' : ''}`} />
-                  Refresh
-                </button>
-                {enabledModules.has('stakeholder') && activeCache?.data?.company?.ticker && (
-                  <button
-                    onClick={() => setStakeholderTicker(activeCache.data.company!.ticker)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-cyan-700/50 bg-cyan-950/20 text-xs font-bold text-cyan-300 hover:bg-cyan-900/30 transition-colors"
-                  >
-                    <Activity className="w-3 h-3" /> Stakeholder
-                  </button>
-                )}
-              </div>
-            </>
-          ) : (
-            <span className="text-sm text-slate-600 italic">Select a ticker from the watchlist</span>
-          )}
-        </div>
-
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6">
-          <AnimatePresence mode="wait">
-            {!activeTicker ? (
-              <motion.div
-                key="empty"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                className="h-full flex flex-col items-center justify-center text-center gap-4"
-              >
-                <LayoutDashboard className="w-12 h-12 text-slate-800" />
-                <div>
-                  <p className="text-slate-500 font-medium">Your watchlist is empty</p>
-                  <p className="text-slate-600 text-sm mt-1">Add a ticker to start monitoring</p>
-                </div>
-                <button
-                  onClick={() => setShowAddInput(true)}
-                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-bold transition-colors"
-                >
-                  <Plus className="w-4 h-4" /> Add your first ticker
-                </button>
-              </motion.div>
-            ) : isActive && !activeCache ? (
-              <motion.div
-                key="loading"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                className="flex flex-col items-center justify-center gap-4 pt-20"
-              >
-                <div className="flex items-center gap-3 bg-slate-900/80 border border-blue-500/20 rounded-xl px-6 py-4">
-                  <Bot className="w-5 h-5 text-blue-400 animate-pulse" />
-                  <div>
-                    <div className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Multi-Agent Analysis</div>
-                    <div className="text-sm text-slate-200 mt-0.5">{agentStatus || 'Starting agents…'}</div>
-                  </div>
-                </div>
-              </motion.div>
-            ) : activeCache ? (
-              <motion.div
-                key={activeTicker}
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              >
-                <AnalysisDashboard
-                  data={activeCache.data}
-                  isLoading={isActive}
-                  onReset={() => analyze(activeTicker)}
-                  sectionOverrides={sectionOverrides}
-                  hideToolbar={false}
-                />
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onRefresh}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-700 rounded-lg text-xs font-bold text-slate-400 hover:text-white transition-colors disabled:opacity-40"
+          >
+            <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} /> Refresh data
+          </button>
         </div>
       </div>
 
-      {/* Stakeholder modal (on-demand) */}
-      {stakeholderTicker && (
-        <StakeholderModal
-          ticker={stakeholderTicker}
-          onClose={() => setStakeholderTicker(null)}
-          onComplete={(output) => {
-            if (activeTicker) {
-              setCache(prev => ({
-                ...prev,
-                [activeTicker]: {
-                  ...prev[activeTicker],
-                  data: { ...(prev[activeTicker]?.data ?? {}), stakeholder: output },
-                  analyzedAt: prev[activeTicker]?.analyzedAt ?? new Date().toISOString()
-                }
-              }));
-            }
-            setStakeholderTicker(null);
-          }}
-        />
-      )}
+      {/* ── 2-column grid ─────────────────────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+        {/* Left column */}
+        <div className="space-y-5">
+          {/* Signal card */}
+          <div className={`rounded-2xl border p-5 ${latest ? vc.badge.replace('text-', 'border-').replace(/bg-[^ ]+/, 'bg-[#080a0f]/90') : 'border-slate-800 bg-[#080a0f]/90'}`}>
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Investment Signal</div>
+            {loading && !latest ? (
+              <div className="space-y-2"><Skeleton h="h-8" w="w-24" /><Skeleton /><Skeleton w="w-3/4" /></div>
+            ) : latest ? (
+              <>
+                <div className="flex items-center gap-3 mb-4">
+                  <div className={`w-3 h-3 rounded-full ${vc.dot}`} />
+                  <span className={`text-3xl font-black font-mono tracking-widest ${vc.text}`}>{latest.verdict}</span>
+                  <span className={`ml-auto text-[11px] font-bold uppercase tracking-widest ${confidenceStyle(latest.confidence)}`}>
+                    {latest.confidence} confidence
+                  </span>
+                </div>
+                {latest.key_reasons.length > 0 && (
+                  <div className="mb-3">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Key Reasons
+                    </div>
+                    <ul className="space-y-1.5">
+                      {latest.key_reasons.map((r, i) => (
+                        <li key={i} className="flex items-start gap-2 text-xs text-slate-300 leading-snug">
+                          <span className="mt-1 w-1 h-1 rounded-full bg-emerald-500 shrink-0" />{r}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {latest.risk_warnings.length > 0 && (
+                  <div className="border-t border-slate-800/60 pt-3">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3 h-3 text-amber-500" /> Risk Warnings
+                    </div>
+                    <ul className="space-y-1.5">
+                      {latest.risk_warnings.map((w, i) => (
+                        <li key={i} className="flex items-start gap-2 text-xs text-slate-400 leading-snug">
+                          <span className="mt-1 w-1 h-1 rounded-full bg-amber-500 shrink-0" />{w}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <div className="mt-3 text-[10px] text-slate-600">
+                  Signal generated: {relTime(latest.created_at || latest.generated_at)}
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-slate-500 italic">No signal yet — run a full analysis to generate one.</p>
+            )}
+          </div>
+
+          {/* Price card */}
+          <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Market Data</div>
+            {loading && !quote ? (
+              <div className="space-y-2"><Skeleton h="h-8" w="w-28" /><Skeleton w="w-1/2" /></div>
+            ) : quote ? (
+              <div className="space-y-3">
+                <div className="flex items-end gap-3">
+                  <span className="text-2xl font-black text-white font-mono">
+                    {fmtPrice(quote.regularMarketPrice, quote.currency)}
+                  </span>
+                  <span className={`flex items-center gap-1 font-bold text-sm mb-0.5 ${change.cls}`}>
+                    {quote.regularMarketChangePercent !== undefined && (
+                      quote.regularMarketChangePercent >= 0
+                        ? <TrendingUp className="w-4 h-4" />
+                        : <TrendingDown className="w-4 h-4" />
+                    )}
+                    {change.text}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-slate-900/50 rounded-lg px-3 py-2">
+                    <div className="text-[10px] text-slate-600 uppercase tracking-widest">Market Cap</div>
+                    <div className="text-sm font-bold text-slate-300 mt-0.5">{fmtMktCap(quote.marketCap, quote.currency)}</div>
+                  </div>
+                  <div className="bg-slate-900/50 rounded-lg px-3 py-2">
+                    <div className="text-[10px] text-slate-600 uppercase tracking-widest">Trailing P/E</div>
+                    <div className="text-sm font-bold text-slate-300 mt-0.5">
+                      {quote.trailingPE ? `${quote.trailingPE.toFixed(1)}x` : '—'}
+                    </div>
+                  </div>
+                </div>
+                {quote.currency && quote.currency !== 'USD' && (
+                  <p className="text-[10px] text-amber-500/70">Local currency · not converted</p>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500 italic">No market data — refresh to fetch.</p>
+            )}
+          </div>
+        </div>
+
+        {/* Right column */}
+        <div className="space-y-5">
+          {/* News signals */}
+          <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <Globe className="w-4 h-4 text-cyan-400" />
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">News Signals</span>
+              <span className="ml-auto text-[10px] text-slate-600">from last analysis</span>
+            </div>
+            {webIntel?.news_signals && webIntel.news_signals.length > 0 ? (
+              <div className="space-y-2">
+                {webIntel.news_signals.slice(0, 3).map((item, i) => (
+                  <a
+                    key={i}
+                    href={item.url || undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block rounded-lg border border-slate-800 bg-slate-950/40 p-3 hover:border-cyan-900/50 transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-xs font-bold text-white leading-snug line-clamp-2">{item.title}</span>
+                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${sentimentStyle(item.sentiment)}`}>
+                        {item.sentiment}
+                      </span>
+                    </div>
+                    {item.snippet && <p className="text-[11px] text-slate-500 mt-1 line-clamp-2 leading-snug">{item.snippet}</p>}
+                  </a>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-600 italic">No news data — run a full analysis to populate.</p>
+            )}
+          </div>
+
+          {/* Compliance alerts */}
+          <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <ShieldAlert className="w-4 h-4 text-rose-400" />
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Compliance Alerts</span>
+              <span className="ml-auto text-[10px] text-slate-600">from last analysis</span>
+            </div>
+            {compliance?.alerts && compliance.alerts.length > 0 ? (
+              <div className="space-y-2">
+                {compliance.alerts.slice(0, 3).map((alert, i) => (
+                  <div key={i} className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                    <div className="flex items-start gap-2">
+                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest mt-0.5 ${urgencyStyle(alert.urgency)}`}>
+                        {alert.urgency}
+                      </span>
+                      <p className="text-xs text-slate-300 leading-snug line-clamp-3">{alert.summary}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-600 italic">No compliance data — run a full analysis to populate.</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Signal history (full width) ─────────────────────────────────── */}
+      <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <History className="w-4 h-4 text-indigo-400" />
+          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Signal History</span>
+          <span className="ml-auto text-[10px] text-slate-600">last 5 signals</span>
+        </div>
+        {signalHistory.length === 0 ? (
+          <p className="text-xs text-slate-600 italic text-center py-4">No signal history yet.</p>
+        ) : (
+          <div className="relative">
+            {/* Timeline line */}
+            <div className="absolute left-[7px] top-2 bottom-2 w-px bg-slate-800" />
+            <div className="space-y-4">
+              {signalHistory.slice(0, 5).map((rec, i) => {
+                const rvc = verdictStyle(rec.verdict);
+                return (
+                  <div key={i} className="flex items-start gap-4">
+                    <div className={`w-3.5 h-3.5 rounded-full shrink-0 mt-1 ring-2 ring-[#080a0f] ${rvc.dot}`} />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-[10px] font-bold uppercase tracking-widest font-mono ${rvc.text}`}>{rec.verdict}</span>
+                        <span className={`text-[10px] font-bold uppercase tracking-widest ${confidenceStyle(rec.confidence)}`}>{rec.confidence}</span>
+                        <span className="ml-auto text-[10px] text-slate-600">
+                          {new Date(rec.created_at || rec.generated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </span>
+                      </div>
+                      {rec.key_reasons[0] && (
+                        <p className="text-[11px] text-slate-500 mt-0.5 truncate">{rec.key_reasons[0]}</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Action buttons ──────────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-3 pb-4">
+        <button
+          onClick={onNavigateToAnalysis}
+          className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-bold transition-all shadow-[0_0_15px_rgba(37,99,235,0.25)]"
+        >
+          <Zap className="w-4 h-4" /> Run Full Analysis
+        </button>
+        <button
+          onClick={onNavigateToAnalysis}
+          className="flex items-center gap-2 px-5 py-2.5 border border-slate-700 bg-[#0a0d14] text-slate-300 hover:text-white hover:border-slate-600 rounded-xl text-sm font-bold transition-colors"
+        >
+          <ExternalLink className="w-4 h-4" /> View Stakeholder & ESG
+        </button>
+        <span className="text-[10px] text-slate-600 ml-auto">
+          Deep analysis available in Market Analysis tab
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── Summary card ──────────────────────────────────────────────────────────────
+
+function SummaryCard({ label, value, sub, accent, valueClass }: {
+  label: string; value: string; sub: string; accent: string; valueClass?: string;
+}) {
+  return (
+    <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+      <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">{label}</div>
+      <div className={`text-3xl font-black font-mono ${valueClass ?? 'text-white'}`}>{value}</div>
+      <div className={`text-[10px] mt-1 font-bold ${accent}`}>{sub}</div>
     </div>
   );
 }
