@@ -338,89 +338,102 @@ export default function AnalysisDashboard({ data, isLoading = false, onReset, on
   return (
     <motion.div ref={dashboardRef} variants={container} initial="hidden" animate="show" className="space-y-6 max-w-6xl mx-auto pb-20">
 
-      {/* ── Header ───────────────────────────────────────────────────────── */}
-      <header className="pdf-section flex flex-col md:flex-row md:items-start justify-between gap-4 bg-[#080a0f]/80 backdrop-blur-md p-6 rounded-2xl shadow-[0_0_30px_rgba(37,99,235,0.05)] border border-slate-800/80">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-blue-600/20 border border-blue-500/30 rounded-xl flex items-center justify-center text-blue-400 font-bold text-xl shadow-[0_0_15px_rgba(37,99,235,0.2)]">
-            {company.name.charAt(0) || '?'}
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold text-white leading-tight font-display tracking-tight">
-                {company.name}
-              </h1>
-              {data.isHistorical && (
-                <span className="bg-amber-950/40 border border-amber-500/30 text-amber-400 text-[10px] font-bold px-2 py-0.5 rounded ml-2 uppercase tracking-widest">
-                  Historical Report
-                </span>
-              )}
-              {isLoading && (
-                <span className="flex items-center gap-1.5 bg-blue-950/40 border border-blue-500/30 text-blue-400 text-[10px] font-bold px-2 py-0.5 rounded ml-2 uppercase tracking-widest">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Agents running…
-                </span>
-              )}
+      {/* ── Header (company info + Market Price + toolbar) ──────────────── */}
+      <header className="pdf-section bg-[#080a0f]/80 backdrop-blur-md p-5 rounded-2xl shadow-[0_0_30px_rgba(37,99,235,0.05)] border border-slate-800/80">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          {/* Left: company identity */}
+          <div className="flex items-center gap-4 min-w-0">
+            <div className="w-12 h-12 shrink-0 bg-blue-600/20 border border-blue-500/30 rounded-xl flex items-center justify-center text-blue-400 font-bold text-xl shadow-[0_0_15px_rgba(37,99,235,0.2)]">
+              {company.name.charAt(0) || '?'}
             </div>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="px-2 py-0.5 bg-slate-900 border border-slate-800 text-slate-400 rounded text-xs font-mono font-bold tracking-wider">
-                {resolvedTicker || company.ticker}
-              </span>
-              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border ${getSentimentColor(sentiment)}`}>
-                {sentiment} Sentiment
-              </span>
-              {data.reportDate && (
-                <span className="text-[10px] text-slate-500 font-bold tracking-wider uppercase ml-1">
-                  Date: {data.reportDate}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {!hideToolbar && <div className="flex flex-wrap items-center justify-start md:justify-end gap-2 md:max-w-[600px]">
-          <InvestmentSignalBadge signal={data.investmentSignal ?? null} />
-          {stock && (
-            <div className="flex flex-col items-end px-4 py-2 bg-[#0a0d14] rounded-xl border border-slate-800 shadow-inner shrink-0">
-              <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Market Price</span>
-              <div className="flex items-center gap-2">
-                <span className="text-lg font-bold text-white font-mono">
-                  {stock.currency === 'USD' ? '$' : (stock.currency || '')}{' '}
-                  {stock.regularMarketPrice?.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                </span>
-                <span className={`text-sm font-bold flex items-center ${(stock.regularMarketChangePercent || 0) >= 0 ? 'text-emerald-400 drop-shadow-[0_0_5px_rgba(52,211,153,0.5)]' : 'text-rose-400 drop-shadow-[0_0_5px_rgba(251,113,133,0.5)]'}`}>
-                  {(stock.regularMarketChangePercent || 0) >= 0
-                    ? <TrendingUp className="w-4 h-4 mr-1" />
-                    : <TrendingDown className="w-4 h-4 mr-1" />}
-                  {Math.abs(stock.regularMarketChangePercent || 0).toFixed(2)}%
-                </span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1 className="text-xl md:text-2xl font-bold text-white leading-tight font-display tracking-tight truncate">
+                  {company.name}
+                </h1>
+                {data.isHistorical && (
+                  <span className="bg-amber-950/40 border border-amber-500/30 text-amber-400 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-widest">
+                    Historical
+                  </span>
+                )}
+                {isLoading && (
+                  <span className="flex items-center gap-1.5 bg-blue-950/40 border border-blue-500/30 text-blue-400 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-widest">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Running
+                  </span>
+                )}
               </div>
-              {stockUsdPrice !== null && stock.currency !== 'USD' && (
-                <span className="mt-0.5 text-[11px] text-slate-400 font-mono">
-                  (~${stockUsdPrice.toFixed(2)} USD)
+              <div className="flex items-center gap-2 mt-1 flex-wrap">
+                <span className="px-2 py-0.5 bg-slate-900 border border-slate-800 text-slate-400 rounded text-xs font-mono font-bold tracking-wider">
+                  {resolvedTicker || company.ticker}
                 </span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border ${getSentimentColor(sentiment)}`}>
+                  {sentiment}
+                </span>
+                {data.reportDate && (
+                  <span className="text-[10px] text-slate-500 font-bold tracking-wider uppercase">{data.reportDate}</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Right: Market Price tile + toolbar buttons */}
+          {!hideToolbar && (
+            <div className="flex items-center gap-2 shrink-0 flex-wrap md:flex-nowrap">
+              {stock && (
+                <div className="flex items-baseline gap-2 px-3 py-1.5 bg-[#0a0d14] rounded-lg border border-slate-800 shrink-0">
+                  <span className="text-base font-bold text-white font-mono leading-none">
+                    {stock.currency === 'USD' ? '$' : ''}{stock.regularMarketPrice?.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </span>
+                  <span className={`text-xs font-bold flex items-center gap-0.5 ${(stock.regularMarketChangePercent || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {(stock.regularMarketChangePercent || 0) >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                    {Math.abs(stock.regularMarketChangePercent || 0).toFixed(2)}%
+                  </span>
+                  {stockUsdPrice !== null && stock.currency !== 'USD' && (
+                    <span className="text-[10px] text-slate-500 font-mono ml-1">~${stockUsdPrice.toFixed(0)}</span>
+                  )}
+                </div>
               )}
-              <span className="mt-0.5 text-[10px] text-amber-400 font-bold">Local currency</span>
+              <button
+                onClick={() => setIsStakeholderModalOpen(true)}
+                disabled={!company.ticker || isLoading}
+                title="Stakeholder Analysis"
+                className="h-9 w-9 flex items-center justify-center bg-cyan-600/90 hover:bg-cyan-500 disabled:opacity-40 text-white rounded-lg transition-colors shrink-0"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => exportPDF(false)} disabled={isExporting || isLoading}
+                title="Export PDF"
+                className="h-9 px-3 flex items-center gap-1.5 bg-blue-600/90 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg transition-colors font-bold text-xs shrink-0"
+              >
+                {isExporting ? <RefreshCcw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                <span className="hidden sm:inline">Export</span>
+              </button>
+              <button
+                onClick={() => exportPDF(true)} disabled={isExporting || isLoading}
+                title="Export all sections"
+                className="h-9 px-2.5 border border-slate-700 bg-[#0a0d14] text-[10px] uppercase font-bold tracking-widest text-slate-400 hover:text-blue-400 hover:border-blue-900/50 transition-colors rounded-lg disabled:opacity-40 shrink-0"
+              >
+                All
+              </button>
+              <button
+                onClick={onReset}
+                title="Reset"
+                className="h-9 w-9 flex items-center justify-center text-slate-400 hover:text-white border border-slate-700 hover:bg-slate-800 bg-[#0a0d14] rounded-lg transition-colors shrink-0"
+              >
+                <RefreshCcw className="w-4 h-4" />
+              </button>
             </div>
           )}
-          <button
-            onClick={() => setIsStakeholderModalOpen(true)}
-            disabled={!company.ticker || isLoading}
-            className="h-10 px-3 flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.25)] font-bold text-xs tracking-wide whitespace-nowrap"
-          >
-            <Plus className="w-4 h-4" />
-            Stakeholder Analysis
-          </button>
-          <button onClick={() => exportPDF(false)} disabled={isExporting || isLoading} className="h-10 px-3 flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] font-bold text-xs tracking-wide whitespace-nowrap">
-            {isExporting ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            Export PDF
-          </button>
-          <button onClick={() => exportPDF(true)} disabled={isExporting || isLoading} className="h-10 px-3 border border-slate-800 bg-[#0a0d14] text-[10px] uppercase font-bold tracking-widest text-slate-400 hover:text-blue-400 hover:border-blue-900/50 transition-colors whitespace-nowrap disabled:opacity-40 rounded-xl">
-            All Sections
-          </button>
-          <button onClick={onReset} className="h-10 w-10 flex items-center justify-center text-slate-400 hover:text-white border border-slate-800 hover:bg-slate-800 bg-[#0a0d14] rounded-xl transition-colors shrink-0">
-            <RefreshCcw className="w-5 h-5" />
-          </button>
-        </div>}
+        </div>
       </header>
+
+      {/* ── Investment Signal banner (full-width below header) ──────────── */}
+      {!hideToolbar && (
+        <div className="pdf-section">
+          <InvestmentSignalBanner signal={data.investmentSignal ?? null} isLoading={isLoading} />
+        </div>
+      )}
 
       {isStakeholderModalOpen && (
         <StakeholderModal
@@ -1237,50 +1250,79 @@ function MetricsGrouped({ metrics }: { metrics: any[] }) {
   );
 }
 
-function InvestmentSignalBadge({ signal }: { signal: InvestmentSignal | null }) {
+/**
+ * Full-width horizontal banner showing the investment signal.
+ * Left: verdict + confidence (large, prominent). Right: reasons + warnings (2 columns).
+ */
+function InvestmentSignalBanner({ signal, isLoading }: { signal: InvestmentSignal | null; isLoading: boolean }) {
   if (!signal) {
     return (
-      <div className="flex flex-col items-center justify-center px-4 py-2 bg-[#0a0d14] rounded-xl border border-slate-700 shadow-inner shrink-0 min-w-[110px]">
-        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">Signal</span>
-        <span className="text-lg font-black tracking-widest font-mono text-slate-500">PENDING</span>
-        <span className="text-[10px] text-slate-600 mt-0.5">Awaiting CIO</span>
+      <div className="flex items-center gap-4 px-6 py-4 bg-[#0a0d14]/80 border border-slate-800 rounded-2xl">
+        <div className="flex items-center gap-3">
+          <div className="w-2.5 h-2.5 rounded-full bg-slate-600 animate-pulse" />
+          <span className="text-xl font-black tracking-widest font-mono text-slate-500">PENDING</span>
+        </div>
+        <span className="text-xs text-slate-500">
+          {isLoading ? 'CIO Agent generating signal…' : 'Awaiting CIO signal — run a full analysis.'}
+        </span>
       </div>
     );
   }
 
   const palette = {
-    BUY:  { bg: 'bg-emerald-950/60', border: 'border-emerald-500/50', text: 'text-emerald-300', dot: 'bg-emerald-400', glow: 'shadow-[0_0_20px_rgba(52,211,153,0.25)]' },
-    SELL: { bg: 'bg-rose-950/60',    border: 'border-rose-500/50',    text: 'text-rose-300',    dot: 'bg-rose-400',    glow: 'shadow-[0_0_20px_rgba(251,113,133,0.25)]' },
-    HOLD: { bg: 'bg-amber-950/60',   border: 'border-amber-500/50',   text: 'text-amber-300',   dot: 'bg-amber-400',   glow: 'shadow-[0_0_20px_rgba(251,191,36,0.25)]' },
+    BUY:  { bg: 'bg-emerald-950/30', border: 'border-emerald-500/40', text: 'text-emerald-300', dot: 'bg-emerald-400', glow: 'shadow-[0_0_25px_rgba(52,211,153,0.15)]', accent: 'text-emerald-500', verdictBg: 'bg-emerald-950/40' },
+    SELL: { bg: 'bg-rose-950/30',    border: 'border-rose-500/40',    text: 'text-rose-300',    dot: 'bg-rose-400',    glow: 'shadow-[0_0_25px_rgba(251,113,133,0.15)]', accent: 'text-rose-500',    verdictBg: 'bg-rose-950/40' },
+    HOLD: { bg: 'bg-amber-950/30',   border: 'border-amber-500/40',   text: 'text-amber-300',   dot: 'bg-amber-400',   glow: 'shadow-[0_0_25px_rgba(251,191,36,0.15)]',  accent: 'text-amber-500',   verdictBg: 'bg-amber-950/40' },
   }[signal.verdict];
 
   return (
-    <div className={`rounded-xl border p-3 shrink-0 max-w-[260px] ${palette.bg} ${palette.border} ${palette.glow}`}>
-      <div className="flex items-center gap-2 mb-2">
-        <div className={`w-2.5 h-2.5 rounded-full animate-pulse ${palette.dot}`} />
-        <span className={`text-2xl font-black tracking-widest font-mono ${palette.text}`}>{signal.verdict}</span>
-        <span className={`ml-auto px-1.5 py-0.5 rounded border text-[10px] font-bold uppercase tracking-widest ${palette.border} ${palette.text} opacity-70`}>
-          {signal.confidence}
-        </span>
-      </div>
-      <ul className="space-y-0.5 mb-1.5">
-        {signal.key_reasons.map((r, i) => (
-          <li key={i} className="flex items-start gap-1.5 text-[11px] text-slate-300 leading-snug">
-            <span className={`mt-1 w-1 h-1 rounded-full shrink-0 ${palette.dot}`} />
-            {r}
-          </li>
-        ))}
-      </ul>
-      {signal.risk_warnings.length > 0 && (
-        <div className="border-t border-slate-700/50 pt-1.5 mt-1.5 space-y-0.5">
-          {signal.risk_warnings.map((w, i) => (
-            <div key={i} className="flex items-start gap-1.5 text-[10px] text-slate-500 leading-snug">
-              <AlertTriangle className="w-2.5 h-2.5 shrink-0 mt-0.5 text-amber-600" />
-              {w}
-            </div>
-          ))}
+    <div className={`rounded-2xl border ${palette.bg} ${palette.border} ${palette.glow} overflow-hidden`}>
+      <div className="grid grid-cols-1 md:grid-cols-[auto_1fr] gap-0">
+        {/* Verdict column */}
+        <div className={`flex flex-col items-center justify-center px-6 py-5 ${palette.verdictBg} md:border-r border-slate-800/50 md:min-w-[160px]`}>
+          <div className="flex items-center gap-2 mb-1">
+            <div className={`w-2.5 h-2.5 rounded-full animate-pulse ${palette.dot}`} />
+            <span className={`text-4xl font-black tracking-widest font-mono ${palette.text}`}>{signal.verdict}</span>
+          </div>
+          <span className={`text-[10px] font-bold uppercase tracking-widest ${palette.text} opacity-80`}>
+            {signal.confidence} confidence
+          </span>
         </div>
-      )}
+
+        {/* Reasons + warnings columns */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 px-6 py-4">
+          {signal.key_reasons.length > 0 && (
+            <div>
+              <div className={`text-[10px] font-bold uppercase tracking-widest mb-1.5 flex items-center gap-1.5 ${palette.accent}`}>
+                <CheckCircle2 className="w-3 h-3" /> Key Reasons
+              </div>
+              <ul className="space-y-1">
+                {signal.key_reasons.map((r, i) => (
+                  <li key={i} className="flex items-start gap-1.5 text-xs text-slate-300 leading-snug">
+                    <span className={`mt-1.5 w-1 h-1 rounded-full shrink-0 ${palette.dot}`} />
+                    {r}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {signal.risk_warnings.length > 0 && (
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-widest mb-1.5 flex items-center gap-1.5 text-amber-500">
+                <AlertTriangle className="w-3 h-3" /> Risk Warnings
+              </div>
+              <ul className="space-y-1">
+                {signal.risk_warnings.map((w, i) => (
+                  <li key={i} className="flex items-start gap-1.5 text-xs text-slate-400 leading-snug">
+                    <span className="mt-1.5 w-1 h-1 rounded-full shrink-0 bg-amber-500" />
+                    {w}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

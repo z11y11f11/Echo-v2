@@ -64,6 +64,9 @@ interface StockQuote {
   shortName?: string;
   marketCap?: number;
   trailingPE?: number;
+  description?: string;   // first 1-2 sentences from assetProfile.longBusinessSummary
+  sector?: string;
+  industry?: string;
 }
 
 interface SignalRecord {
@@ -253,17 +256,34 @@ export default function WatchlistDashboard({ onNavigateToAnalysis: _unused }: { 
   const fetchTickerData = useCallback(async (ticker: string) => {
     setLoadingTickers(prev => new Set(prev).add(ticker));
     try {
-      const [quoteRes, histRes] = await Promise.allSettled([
+      const [quoteRes, histRes, summaryRes] = await Promise.allSettled([
         fetch(`/api/stock/${encodeURIComponent(ticker)}`).then(r => r.ok ? r.json() : null),
         fetch(`/api/log/history/${encodeURIComponent(ticker)}`).then(r => r.ok ? r.json() : []),
+        fetch(`/api/stock/${encodeURIComponent(ticker)}/summary`).then(r => r.ok ? r.json() : null),
       ]);
       if (quoteRes.status === 'fulfilled' && quoteRes.value) {
         const q = quoteRes.value;
+        // Extract 1-2 sentence description from assetProfile
+        let description: string | undefined;
+        let sector: string | undefined;
+        let industry: string | undefined;
+        if (summaryRes.status === 'fulfilled' && summaryRes.value) {
+          const profile = summaryRes.value.assetProfile || {};
+          const raw: string = profile.longBusinessSummary || '';
+          if (raw) {
+            // Take first 2 sentences
+            const sentences = raw.match(/[^.!?]+[.!?]+/g) || [];
+            description = sentences.slice(0, 2).join(' ').trim() || raw.slice(0, 200);
+          }
+          sector   = profile.sector   || undefined;
+          industry = profile.industry || undefined;
+        }
         setQuotes(prev => ({ ...prev, [ticker]: {
           regularMarketPrice: q.regularMarketPrice,
           regularMarketChangePercent: q.regularMarketChangePercent,
           currency: q.currency, longName: q.longName || q.shortName,
           marketCap: q.marketCap, trailingPE: q.trailingPE,
+          description, sector, industry,
         }}));
       }
       if (histRes.status === 'fulfilled' && Array.isArray(histRes.value)) {
@@ -865,7 +885,7 @@ interface IndividualStockViewProps {
 }
 
 function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading, refreshStatus, analysisData, analysisLoading, analysisAgentStatus, onRefresh, onRunAnalysis, onOpenStakeholder }: IndividualStockViewProps) {
-  const latest     = signalHistory[0];
+  const latest      = signalHistory[0];
   const newsSignals = liveEntry?.webIntel?.news_signals ?? [];
   const alerts      = liveEntry?.compliance?.alerts ?? [];
   const vc          = verdictStyle(latest?.verdict);
@@ -874,24 +894,35 @@ function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading,
   const isError      = refreshStatus === 'error';
   const hasReport   = !!analysisData?.company;
 
-  // Auto-show full report tab when analysis completes
-  const [view, setView] = useState<'monitor' | 'report'>('monitor');
+  const [view,        setView]        = useState<'monitor' | 'report'>('monitor');
+  const [showAllNews, setShowAllNews] = useState(false);
+  const [showAllAlerts, setShowAllAlerts] = useState(false);
+
   useEffect(() => { if (hasReport && !analysisLoading) setView('report'); }, [hasReport, analysisLoading]);
+
+  const newsToShow   = showAllNews   ? newsSignals : newsSignals.slice(0, 3);
+  const alertsToShow = showAllAlerts ? alerts      : alerts.slice(0, 3);
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-5">
 
-      {/* Header */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div>
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex-1 min-w-0">
           <div className="flex items-center gap-3">
             <span className="text-2xl font-black font-mono text-white">{ticker}</span>
             {(loading || isRefreshing) && <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />}
           </div>
           {quote?.longName && <p className="text-sm text-slate-400 mt-0.5">{quote.longName}</p>}
+          {/* Company description */}
+          {quote?.description && (
+            <p className="text-xs text-slate-500 mt-2 leading-relaxed max-w-2xl">{quote.description}</p>
+          )}
+          {!quote?.description && quote?.sector && (
+            <p className="text-xs text-slate-500 mt-2">{[quote.sector, quote.industry].filter(Boolean).join(' · ')}</p>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          {/* Refresh status indicator */}
+        <div className="flex items-center gap-2 shrink-0">
           {liveEntry?.refreshedAt && !isRefreshing && !isError && (
             <span className="text-[10px] text-slate-500 flex items-center gap-1">
               <Clock className="w-3 h-3" /> Updated {relTime(liveEntry.refreshedAt)}
@@ -903,8 +934,7 @@ function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading,
             </span>
           )}
           <button
-            onClick={onRefresh}
-            disabled={loading || isRefreshing}
+            onClick={onRefresh} disabled={loading || isRefreshing}
             className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-700 rounded-lg text-xs font-bold text-slate-400 hover:text-white hover:border-blue-500/50 transition-colors disabled:opacity-40"
           >
             <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
@@ -913,147 +943,166 @@ function IndividualStockView({ ticker, quote, signalHistory, liveEntry, loading,
         </div>
       </div>
 
-      {/* 2-col grid */}
+      {/* ── Row 1: Investment Signal + Market Data ─────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
 
-        {/* ── Left: Signal + Price ───────────────────────────────────────── */}
-        <div className="space-y-5">
-          {/* Signal card */}
-          <div className={`rounded-2xl border p-5 ${latest ? 'border-slate-700 bg-[#080a0f]/90' : 'border-slate-800 bg-[#080a0f]/90'}`}>
-            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Investment Signal</div>
-            {loading && !latest ? (
-              <div className="space-y-2"><Sk h="h-8" w="w-24" /><Sk /><Sk w="w-3/4" /></div>
-            ) : latest ? (
-              <>
-                <div className="flex items-center gap-3 mb-4">
-                  <div className={`w-3 h-3 rounded-full ${vc.dot}`} />
-                  <span className={`text-3xl font-black font-mono tracking-widest ${vc.text}`}>{latest.verdict}</span>
-                  <span className={`ml-auto text-[11px] font-bold uppercase tracking-widest ${confidenceStyle(latest.confidence)}`}>{latest.confidence} confidence</span>
-                </div>
-                {latest.key_reasons.length > 0 && (
-                  <div className="mb-3">
-                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Key Reasons
-                    </div>
-                    <ul className="space-y-1.5">
-                      {latest.key_reasons.map((r, i) => (
-                        <li key={i} className="flex items-start gap-2 text-xs text-slate-300 leading-snug">
-                          <span className="mt-1 w-1 h-1 rounded-full bg-emerald-500 shrink-0" />{r}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                {latest.risk_warnings.length > 0 && (
-                  <div className="border-t border-slate-800/60 pt-3">
-                    <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                      <AlertTriangle className="w-3 h-3 text-amber-500" /> Risk Warnings
-                    </div>
-                    <ul className="space-y-1.5">
-                      {latest.risk_warnings.map((w, i) => (
-                        <li key={i} className="flex items-start gap-2 text-xs text-slate-400 leading-snug">
-                          <span className="mt-1 w-1 h-1 rounded-full bg-amber-500 shrink-0" />{w}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <div className="mt-3 text-[10px] text-slate-600">
-                  Signal generated: {relTime(latest.created_at || latest.generated_at)}
-                </div>
-              </>
-            ) : (
-              <p className="text-sm text-slate-500 italic">No signal yet — run a full analysis to generate one.</p>
-            )}
-          </div>
-
-          {/* Price card */}
-          <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
-            <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Market Data</div>
-            {loading && !quote ? (
-              <div className="space-y-2"><Sk h="h-8" w="w-28" /><Sk w="w-1/2" /></div>
-            ) : quote ? (
-              <div className="space-y-3">
-                <div className="flex items-end gap-3">
-                  <span className="text-2xl font-black text-white font-mono">{fmtPrice(quote.regularMarketPrice, quote.currency)}</span>
-                  <span className={`flex items-center gap-1 font-bold text-sm mb-0.5 ${change.cls}`}>
-                    {quote.regularMarketChangePercent != null && (quote.regularMarketChangePercent >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />)}
-                    {change.text}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="bg-slate-900/50 rounded-lg px-3 py-2">
-                    <div className="text-[10px] text-slate-600 uppercase tracking-widest">Market Cap</div>
-                    <div className="text-sm font-bold text-slate-300 mt-0.5">{fmtMktCap(quote.marketCap, quote.currency)}</div>
-                  </div>
-                  <div className="bg-slate-900/50 rounded-lg px-3 py-2">
-                    <div className="text-[10px] text-slate-600 uppercase tracking-widest">Trailing P/E</div>
-                    <div className="text-sm font-bold text-slate-300 mt-0.5">{quote.trailingPE ? `${quote.trailingPE.toFixed(1)}x` : '—'}</div>
-                  </div>
-                </div>
-                {quote.currency && quote.currency !== 'USD' && (
-                  <p className="text-[10px] text-amber-500/70">Local currency · not converted</p>
-                )}
+        {/* Investment Signal */}
+        <div className={`rounded-2xl border p-5 ${latest ? 'border-slate-700 bg-[#080a0f]/90' : 'border-slate-800 bg-[#080a0f]/90'}`}>
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Investment Signal</div>
+          {loading && !latest ? (
+            <div className="space-y-2"><Sk h="h-8" w="w-24" /><Sk /><Sk w="w-3/4" /></div>
+          ) : latest ? (
+            <>
+              <div className="flex items-center gap-3 mb-4">
+                <div className={`w-3 h-3 rounded-full ${vc.dot}`} />
+                <span className={`text-3xl font-black font-mono tracking-widest ${vc.text}`}>{latest.verdict}</span>
+                <span className={`ml-auto text-[11px] font-bold uppercase tracking-widest ${confidenceStyle(latest.confidence)}`}>{latest.confidence} confidence</span>
               </div>
-            ) : (
-              <p className="text-sm text-slate-500 italic">No market data — click Refresh data.</p>
-            )}
-          </div>
+              {latest.key_reasons.length > 0 && (
+                <div className="mb-3">
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Key Reasons
+                  </div>
+                  <ul className="space-y-1.5">
+                    {latest.key_reasons.map((r, i) => (
+                      <li key={i} className="flex items-start gap-2 text-xs text-slate-300 leading-snug">
+                        <span className="mt-1 w-1 h-1 rounded-full bg-emerald-500 shrink-0" />{r}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {latest.risk_warnings.length > 0 && (
+                <div className="border-t border-slate-800/60 pt-3">
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                    <AlertTriangle className="w-3 h-3 text-amber-500" /> Risk Warnings
+                  </div>
+                  <ul className="space-y-1.5">
+                    {latest.risk_warnings.map((w, i) => (
+                      <li key={i} className="flex items-start gap-2 text-xs text-slate-400 leading-snug">
+                        <span className="mt-1 w-1 h-1 rounded-full bg-amber-500 shrink-0" />{w}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="mt-3 text-[10px] text-slate-600">Generated: {relTime(latest.created_at || latest.generated_at)}</div>
+            </>
+          ) : (
+            <p className="text-sm text-slate-500 italic">No signal yet — run a full analysis to generate one.</p>
+          )}
         </div>
 
-        {/* ── Right: News + Compliance ───────────────────────────────────── */}
-        <div className="space-y-5">
-          {/* News */}
-          <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
-            <div className="flex items-center gap-2 mb-3">
-              <Globe className="w-4 h-4 text-cyan-400" />
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">News Signals</span>
-              {isRefreshing && <Loader2 className="w-3 h-3 text-blue-400 animate-spin ml-auto" />}
-              {liveEntry?.refreshedAt && !isRefreshing && (
-                <span className="ml-auto text-[10px] text-slate-600">{relTime(liveEntry.refreshedAt)}</span>
+        {/* Market Data */}
+        <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Market Data</div>
+          {loading && !quote ? (
+            <div className="space-y-2"><Sk h="h-8" w="w-28" /><Sk w="w-1/2" /></div>
+          ) : quote ? (
+            <div className="space-y-3">
+              <div className="flex items-end gap-3">
+                <span className="text-2xl font-black text-white font-mono">{fmtPrice(quote.regularMarketPrice, quote.currency)}</span>
+                <span className={`flex items-center gap-1 font-bold text-sm mb-0.5 ${change.cls}`}>
+                  {quote.regularMarketChangePercent != null && (quote.regularMarketChangePercent >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />)}
+                  {change.text}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-900/50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-600 uppercase tracking-widest">Market Cap</div>
+                  <div className="text-sm font-bold text-slate-300 mt-0.5">{fmtMktCap(quote.marketCap, quote.currency)}</div>
+                </div>
+                <div className="bg-slate-900/50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-600 uppercase tracking-widest">Trailing P/E</div>
+                  <div className="text-sm font-bold text-slate-300 mt-0.5">{quote.trailingPE ? `${quote.trailingPE.toFixed(1)}x` : '—'}</div>
+                </div>
+              </div>
+              {quote.currency && quote.currency !== 'USD' && (
+                <p className="text-[10px] text-amber-500/70">Local currency · not converted</p>
               )}
             </div>
-            {newsSignals.length > 0 ? (
-              <div className="space-y-2">
-                {newsSignals.slice(0, 3).map((item, i) => (
-                  <a key={i} href={item.url || undefined} target="_blank" rel="noreferrer"
-                    className="block rounded-lg border border-slate-800 bg-slate-950/40 p-3 hover:border-cyan-900/50 transition-colors">
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="text-xs font-bold text-white leading-snug line-clamp-2">{item.title}</span>
-                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${sentimentStyle(item.sentiment)}`}>{item.sentiment}</span>
-                    </div>
-                    {item.snippet && <p className="text-[11px] text-slate-500 mt-1 line-clamp-2 leading-snug">{item.snippet}</p>}
-                  </a>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-600 italic">{isRefreshing ? 'Fetching news…' : 'No news data — click Refresh data.'}</p>
-            )}
-          </div>
+          ) : (
+            <p className="text-sm text-slate-500 italic">No market data — click Refresh data.</p>
+          )}
+        </div>
+      </div>
 
-          {/* Compliance */}
-          <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
-            <div className="flex items-center gap-2 mb-3">
-              <ShieldAlert className="w-4 h-4 text-rose-400" />
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Compliance Alerts</span>
-              {isRefreshing && <Loader2 className="w-3 h-3 text-blue-400 animate-spin ml-auto" />}
+      {/* ── News Signals (expandable) ───────────────────────────────────────── */}
+      <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <Globe className="w-4 h-4 text-cyan-400" />
+          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">News Signals</span>
+          {isRefreshing && <Loader2 className="w-3 h-3 text-blue-400 animate-spin ml-auto" />}
+          {liveEntry?.refreshedAt && !isRefreshing && (
+            <span className="ml-auto text-[10px] text-slate-600">{relTime(liveEntry.refreshedAt)}</span>
+          )}
+        </div>
+        {newsSignals.length > 0 ? (
+          <>
+            <div className="space-y-2">
+              {newsToShow.map((item, i) => (
+                <a key={i} href={item.url || undefined} target="_blank" rel="noreferrer"
+                  className="block rounded-lg border border-slate-800 bg-slate-950/40 p-3 hover:border-cyan-900/50 transition-colors">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-xs font-bold text-white leading-snug line-clamp-2">{item.title}</span>
+                    <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest ${sentimentStyle(item.sentiment)}`}>{item.sentiment}</span>
+                  </div>
+                  {item.snippet && <p className="text-[11px] text-slate-500 mt-1 leading-snug">{item.snippet}</p>}
+                  {item.date && <p className="text-[10px] text-slate-700 mt-1 font-mono">{item.date}</p>}
+                </a>
+              ))}
             </div>
-            {alerts.length > 0 ? (
-              <div className="space-y-2">
-                {alerts.slice(0, 3).map((alert, i) => (
-                  <div key={i} className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-                    <div className="flex items-start gap-2">
-                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest mt-0.5 ${urgencyStyle(alert.urgency)}`}>{alert.urgency}</span>
-                      <p className="text-xs text-slate-300 leading-snug line-clamp-3">{alert.summary}</p>
+            {newsSignals.length > 3 && (
+              <button
+                onClick={() => setShowAllNews(v => !v)}
+                className="mt-3 w-full py-1.5 rounded-lg border border-slate-800 text-[11px] font-bold text-slate-500 hover:text-slate-300 hover:border-slate-700 transition-colors"
+              >
+                {showAllNews ? `Show less` : `Show ${newsSignals.length - 3} more`}
+              </button>
+            )}
+          </>
+        ) : (
+          <p className="text-xs text-slate-600 italic">{isRefreshing ? 'Fetching news…' : 'No news data — click Refresh data.'}</p>
+        )}
+      </div>
+
+      {/* ── Compliance Alerts (expandable) ─────────────────────────────────── */}
+      <div className="bg-[#080a0f]/80 border border-slate-800 rounded-2xl p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <ShieldAlert className="w-4 h-4 text-rose-400" />
+          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Compliance Alerts</span>
+          {isRefreshing && <Loader2 className="w-3 h-3 text-blue-400 animate-spin ml-auto" />}
+          {alerts.length > 0 && (
+            <span className="ml-auto text-[10px] text-slate-600">{alerts.length} alert{alerts.length !== 1 ? 's' : ''}</span>
+          )}
+        </div>
+        {alerts.length > 0 ? (
+          <>
+            <div className="space-y-2">
+              {alertsToShow.map((alert, i) => (
+                <div key={i} className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                  <div className="flex items-start gap-2">
+                    <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest mt-0.5 ${urgencyStyle(alert.urgency)}`}>{alert.urgency}</span>
+                    <div className="min-w-0">
+                      <p className="text-xs text-slate-300 leading-snug">{alert.summary}</p>
+                      {alert.date && <p className="text-[10px] text-slate-700 mt-1 font-mono">{alert.date}</p>}
                     </div>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-slate-600 italic">{isRefreshing ? 'Fetching alerts…' : 'No compliance data — click Refresh data.'}</p>
+                </div>
+              ))}
+            </div>
+            {alerts.length > 3 && (
+              <button
+                onClick={() => setShowAllAlerts(v => !v)}
+                className="mt-3 w-full py-1.5 rounded-lg border border-slate-800 text-[11px] font-bold text-slate-500 hover:text-slate-300 hover:border-slate-700 transition-colors"
+              >
+                {showAllAlerts ? `Show less` : `Show ${alerts.length - 3} more`}
+              </button>
             )}
-          </div>
-        </div>
+          </>
+        ) : (
+          <p className="text-xs text-slate-600 italic">{isRefreshing ? 'Fetching alerts…' : 'No compliance data — click Refresh data.'}</p>
+        )}
       </div>
 
       {/* Signal history */}
